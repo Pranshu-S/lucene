@@ -22,6 +22,9 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.oneOf;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.FilterCodec;
@@ -31,12 +34,20 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.index.CodecReader;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.LeafReader;
+import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.search.AcceptDocs;
+import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.index.BaseKnnVectorsFormatTestCase;
 import org.apache.lucene.tests.util.TestUtil;
+import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.SameThreadExecutorService;
 
 public class TestLucene99HnswVectorsFormat extends BaseKnnVectorsFormatTestCase {
@@ -91,6 +102,59 @@ public class TestLucene99HnswVectorsFormat extends BaseKnnVectorsFormatTestCase 
           assertEquals(vector.length * Float.BYTES, (long) offHeap.get("vec"));
           assertNotNull(offHeap.get("vex"));
           assertEquals(2, offHeap.size());
+        }
+      }
+    }
+  }
+
+  /**
+   * A selective filter takes the exhaustive (non-HNSW) path, which must score exactly the accepted
+   * docs that have a vector, on both dense and sparse fields.
+   */
+  public void testExhaustiveSearchWithSelectiveFilter() throws IOException {
+    boolean sparse = random().nextBoolean();
+    int numDocs = 2000;
+    int dim = 4;
+    VectorSimilarityFunction similarity = VectorSimilarityFunction.EUCLIDEAN;
+    Codec codec = TestUtil.alwaysKnnVectorsFormat(new Lucene99HnswVectorsFormat());
+    try (Directory dir = newDirectory();
+        IndexWriter w = new IndexWriter(dir, newIndexWriterConfig().setCodec(codec))) {
+      for (int i = 0; i < numDocs; i++) {
+        Document doc = new Document();
+        if (sparse == false || i % 3 == 0) {
+          doc.add(new KnnFloatVectorField("f", randomVector(dim), similarity));
+        }
+        w.addDocument(doc);
+      }
+      w.forceMerge(1);
+      try (IndexReader reader = DirectoryReader.open(w)) {
+        LeafReader r = getOnlyLeafReader(reader);
+        FixedBitSet filter = new FixedBitSet(r.maxDoc());
+        for (int i = 0; i < 30; i++) {
+          filter.set(random().nextInt(r.maxDoc()));
+        }
+        float[] target = randomVector(dim);
+        int k = 10;
+
+        List<ScoreDoc> expected = new ArrayList<>();
+        FloatVectorValues values = r.getFloatVectorValues("f");
+        KnnVectorValues.DocIndexIterator it = values.iterator();
+        for (int doc = it.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = it.nextDoc()) {
+          if (filter.get(doc)) {
+            expected.add(
+                new ScoreDoc(doc, similarity.compare(target, values.vectorValue(it.index()))));
+          }
+        }
+        expected.sort(Comparator.comparingDouble((ScoreDoc sd) -> -sd.score));
+
+        TopDocs actual =
+            r.searchNearestVectors(
+                "f", target, k, AcceptDocs.fromLiveDocs(filter, r.maxDoc()), Integer.MAX_VALUE);
+        assertEquals(expected.size(), actual.totalHits.value());
+        assertEquals(Math.min(k, expected.size()), actual.scoreDocs.length);
+        for (int i = 0; i < actual.scoreDocs.length; i++) {
+          assertEquals(expected.get(i).doc, actual.scoreDocs[i].doc);
+          assertEquals(expected.get(i).score, actual.scoreDocs[i].score, 1e-5f);
         }
       }
     }

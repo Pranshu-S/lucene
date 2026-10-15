@@ -35,6 +35,7 @@ import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.Float16VectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.MergePolicy;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
@@ -42,6 +43,7 @@ import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.internal.hppc.IntObjectHashMap;
 import org.apache.lucene.search.AcceptDocs;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.KnnCollector;
 import org.apache.lucene.store.ChecksumIndexInput;
 import org.apache.lucene.store.DataAccessHint;
@@ -319,7 +321,8 @@ public final class Lucene99HnswVectorsReader extends KnnVectorsReader
         fieldEntry,
         knnCollector,
         acceptDocs,
-        () -> flatVectorsReader.getRandomVectorScorer(field, target));
+        () -> flatVectorsReader.getRandomVectorScorer(field, target),
+        () -> flatVectorsReader.getFloatVectorValues(field));
   }
 
   @Override
@@ -330,7 +333,8 @@ public final class Lucene99HnswVectorsReader extends KnnVectorsReader
         fieldEntry,
         knnCollector,
         acceptDocs,
-        () -> flatVectorsReader.getRandomVectorScorer(field, target));
+        () -> flatVectorsReader.getRandomVectorScorer(field, target),
+        () -> flatVectorsReader.getByteVectorValues(field));
   }
 
   @Override
@@ -341,14 +345,16 @@ public final class Lucene99HnswVectorsReader extends KnnVectorsReader
         fieldEntry,
         knnCollector,
         acceptDocs,
-        () -> flatVectorsReader.getRandomVectorScorer(field, target));
+        () -> flatVectorsReader.getRandomVectorScorer(field, target),
+        () -> flatVectorsReader.getFloat16VectorValues(field));
   }
 
   private void search(
       FieldEntry fieldEntry,
       KnnCollector knnCollector,
       AcceptDocs acceptDocs,
-      IOSupplier<RandomVectorScorer> scorerSupplier)
+      IOSupplier<RandomVectorScorer> scorerSupplier,
+      IOSupplier<? extends KnnVectorValues> valuesSupplier)
       throws IOException {
     if (fieldEntry.size() == 0 || knnCollector.k() == 0) {
       return;
@@ -379,31 +385,50 @@ public final class Lucene99HnswVectorsReader extends KnnVectorsReader
       int[] ords = new int[EXHAUSTIVE_BULK_SCORE_ORDS];
       float[] scores = new float[EXHAUSTIVE_BULK_SCORE_ORDS];
       int numOrds = 0;
-      for (int i = 0; i < numVectors; i++) {
-        if (acceptedOrds == null || acceptedOrds.get(i)) {
-          if (knnCollector.earlyTerminated()) {
-            break;
-          }
-          ords[numOrds++] = i;
+      if (accepted == null) {
+        for (int ord = 0; ord < numVectors && knnCollector.earlyTerminated() == false; ord++) {
+          ords[numOrds++] = ord;
           if (numOrds == ords.length) {
-            knnCollector.incVisitedCount(numOrds);
-            if (scorer.bulkScore(ords, scores, numOrds) > knnCollector.minCompetitiveSimilarity()) {
-              for (int j = 0; j < numOrds; j++) {
-                knnCollector.collect(scorer.ordToDoc(ords[j]), scores[j]);
-              }
-            }
+            exhaustiveScore(scorer, knnCollector, ords, scores, numOrds);
             numOrds = 0;
           }
         }
-      }
-
-      if (numOrds > 0) {
-        knnCollector.incVisitedCount(numOrds);
-        if (scorer.bulkScore(ords, scores, numOrds) > knnCollector.minCompetitiveSimilarity()) {
-          for (int j = 0; j < numOrds; j++) {
-            knnCollector.collect(scorer.ordToDoc(ords[j]), scores[j]);
+      } else {
+        // Walk the accepted docs rather than probing every ordinal: with a selective filter the
+        // accept set is far smaller than the segment. The vector iterator maps each doc to its ord.
+        DocIdSetIterator acceptedDocs = acceptDocs.iterator();
+        KnnVectorValues.DocIndexIterator vectorDocs = valuesSupplier.get().iterator();
+        int doc = acceptedDocs.nextDoc();
+        while (doc != NO_MORE_DOCS && knnCollector.earlyTerminated() == false) {
+          int vectorDoc = vectorDocs.docID() < doc ? vectorDocs.advance(doc) : vectorDocs.docID();
+          if (vectorDoc == NO_MORE_DOCS) {
+            break;
           }
+          if (vectorDoc != doc) {
+            doc = acceptedDocs.advance(vectorDoc);
+            continue;
+          }
+          ords[numOrds++] = vectorDocs.index();
+          if (numOrds == ords.length) {
+            exhaustiveScore(scorer, knnCollector, ords, scores, numOrds);
+            numOrds = 0;
+          }
+          doc = acceptedDocs.nextDoc();
         }
+      }
+      if (numOrds > 0) {
+        exhaustiveScore(scorer, knnCollector, ords, scores, numOrds);
+      }
+    }
+  }
+
+  private static void exhaustiveScore(
+      RandomVectorScorer scorer, KnnCollector knnCollector, int[] ords, float[] scores, int numOrds)
+      throws IOException {
+    knnCollector.incVisitedCount(numOrds);
+    if (scorer.bulkScore(ords, scores, numOrds) > knnCollector.minCompetitiveSimilarity()) {
+      for (int j = 0; j < numOrds; j++) {
+        knnCollector.collect(scorer.ordToDoc(ords[j]), scores[j]);
       }
     }
   }

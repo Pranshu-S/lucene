@@ -202,6 +202,9 @@ Improvements
 Optimizations
 ---------------------
 
+* GITHUB#XXXXX: Lucene99HnswVectorsReader's exhaustive search for selective filters now iterates
+  the accepted docs instead of probing every vector ordinal. (Pranshu Shukla)
+
 * GITHUB#16431: Add support for Block-Max WAND dynamic score skipping in FunctionScoreQuery
   and DoubleValuesSource using DocValuesSkipper. (Rajat Jain)
 
