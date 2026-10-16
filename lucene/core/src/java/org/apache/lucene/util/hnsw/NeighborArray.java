@@ -129,17 +129,23 @@ public class NeighborArray {
    * multiple threads while other add method is only supposed to be called by one thread.
    *
    * @param nodeId node Id of the owner of this NeighbourArray
+   * @param scratchScores caller-owned buffer for bulk scoring, at least {@link #maxSize()} long
    */
   public void addAndEnsureDiversity(
-      int newNode, float newScore, int nodeId, UpdateableRandomVectorScorer scorer)
+      int newNode,
+      float newScore,
+      int nodeId,
+      UpdateableRandomVectorScorer scorer,
+      float[] scratchScores)
       throws IOException {
+    assert scratchScores.length >= maxSize;
     addOutOfOrder(newNode, newScore);
     if (size < maxSize) {
       return;
     }
     // we're oversize, need to do diversity check and pop out the least diverse neighbour
     scorer.setScoringOrdinal(nodeId);
-    removeIndex(findWorstNonDiverse(scorer));
+    removeIndex(findWorstNonDiverse(scorer, scratchScores));
     assert size == maxSize - 1;
   }
 
@@ -289,7 +295,8 @@ public class NeighborArray {
    * Find first non-diverse neighbour among the list of neighbors starting from the most distant
    * neighbours
    */
-  private int findWorstNonDiverse(UpdateableRandomVectorScorer scorer) throws IOException {
+  private int findWorstNonDiverse(UpdateableRandomVectorScorer scorer, float[] scratchScores)
+      throws IOException {
     int[] uncheckedIndexes = sort(scorer);
     assert uncheckedIndexes != null : "We will always have something unchecked";
     int uncheckedCursor = uncheckedIndexes.length - 1;
@@ -299,7 +306,7 @@ public class NeighborArray {
         break;
       }
       scorer.setScoringOrdinal(nodes[i]);
-      if (isWorstNonDiverse(i, uncheckedIndexes, uncheckedCursor, scorer)) {
+      if (isWorstNonDiverse(i, uncheckedIndexes, uncheckedCursor, scorer, scratchScores)) {
         return i;
       }
       if (i == uncheckedIndexes[uncheckedCursor]) {
@@ -310,18 +317,20 @@ public class NeighborArray {
   }
 
   private boolean isWorstNonDiverse(
-      int candidateIndex, int[] uncheckedIndexes, int uncheckedCursor, RandomVectorScorer scorer)
+      int candidateIndex,
+      int[] uncheckedIndexes,
+      int uncheckedCursor,
+      RandomVectorScorer scorer,
+      float[] scratchScores)
       throws IOException {
     float minAcceptedSimilarity = scores[candidateIndex];
     if (candidateIndex == uncheckedIndexes[uncheckedCursor]) {
-      // the candidate itself is unchecked
-      for (int i = candidateIndex - 1; i >= 0; i--) {
-        float neighborSimilarity = scorer.score(nodes[i]);
-        // candidate node is too similar to node i given its score relative to the base node
-        if (neighborSimilarity >= minAcceptedSimilarity) {
-          return true;
-        }
-      }
+      // the candidate itself is unchecked, so compare it with every closer neighbour. These are the
+      // contiguous prefix nodes[0..candidateIndex), which can be bulk scored in place. The
+      // candidate
+      // is too similar to one of them given its score relative to the base node if any score
+      // reaches minAcceptedSimilarity.
+      return scorer.bulkScore(nodes, scratchScores, candidateIndex) >= minAcceptedSimilarity;
     } else {
       // else we just need to make sure candidate does not violate diversity with the (newly
       // inserted) unchecked nodes

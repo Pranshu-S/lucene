@@ -72,6 +72,8 @@ public class HnswGraphBuilder implements HnswBuilder {
 
   private final int[] bulkScoreNodes; // for bulk scoring
   private final float[] bulkScores; // for bulk scoring
+  // for bulk scoring a full neighbour list in NeighborArray's diversity check, grown on demand
+  private float[] diversityScores = new float[0];
   private final SplittableRandom random;
   protected final UpdateableRandomVectorScorer scorer;
   protected final HnswGraphSearcher graphSearcher;
@@ -472,7 +474,10 @@ public class HnswGraphBuilder implements HnswBuilder {
         if (nbrsOfNbr.nodes()[j] == node) return;
       }
     }
-    nbrsOfNbr.addAndEnsureDiversity(node, score, nbr, scorer);
+    if (diversityScores.length < nbrsOfNbr.maxSize()) {
+      diversityScores = new float[nbrsOfNbr.maxSize()];
+    }
+    nbrsOfNbr.addAndEnsureDiversity(node, score, nbr, scorer, diversityScores);
   }
 
   /**

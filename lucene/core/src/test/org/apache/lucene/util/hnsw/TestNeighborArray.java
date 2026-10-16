@@ -18,6 +18,8 @@
 package org.apache.lucene.util.hnsw;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.Bits;
 
@@ -433,6 +435,73 @@ public class TestNeighborArray extends LuceneTestCase {
     neighbors.sort(scorer);
     assertScoresEqual(new float[] {1.0f, 0.9f, 0.8f, 0.7f}, neighbors);
     assertNodesEqual(new int[] {0, 2, 1, 3}, neighbors);
+  }
+
+  public void testAddAndEnsureDiversityRemovesNonDiverseCandidate() throws IOException {
+    // 1-D points; node 0 is the owner, similarity is the negated distance
+    LineScorer scorer = new LineScorer(0f, 1f, -1.2f, -5f, 1.4f);
+    NeighborArray neighbors = new NeighborArray(4, true);
+    neighbors.addInOrder(1, -1f);
+    neighbors.addInOrder(2, -1.2f);
+    neighbors.addInOrder(3, -5f);
+
+    // node 4 sorts between nodes 2 and 3 and is closer to node 1 than to the owner
+    neighbors.addAndEnsureDiversity(4, -1.4f, 0, scorer, new float[4]);
+
+    assertNodesEqual(new int[] {1, 2, 3}, neighbors);
+    assertEquals(3, neighbors.size());
+    // the closer neighbours nodes[0..2) were scored against node 4 in a single bulk call
+    assertEquals(List.of(2), scorer.bulkSizes);
+  }
+
+  public void testAddAndEnsureDiversityKeepsDiverseCandidate() throws IOException {
+    LineScorer scorer = new LineScorer(0f, 1f, 3f, -1.5f);
+    NeighborArray neighbors = new NeighborArray(3, true);
+    neighbors.addInOrder(1, -1f);
+    neighbors.addInOrder(2, -3f);
+
+    // node 3 is diverse with respect to node 1, so the worst neighbour (node 2) is dropped
+    neighbors.addAndEnsureDiversity(3, -1.5f, 0, scorer, new float[3]);
+
+    assertNodesEqual(new int[] {1, 3}, neighbors);
+    assertEquals(2, neighbors.size());
+  }
+
+  /** Points on a line, scored by negated distance, recording the size of each bulk call. */
+  private static class LineScorer implements UpdateableRandomVectorScorer {
+    private final float[] positions;
+    private final List<Integer> bulkSizes = new ArrayList<>();
+    private int scoringOrd;
+
+    LineScorer(float... positions) {
+      this.positions = positions;
+    }
+
+    @Override
+    public void setScoringOrdinal(int node) {
+      scoringOrd = node;
+    }
+
+    @Override
+    public float score(int node) {
+      return -Math.abs(positions[scoringOrd] - positions[node]);
+    }
+
+    @Override
+    public float bulkScore(int[] nodes, float[] scores, int numNodes) {
+      bulkSizes.add(numNodes);
+      float max = Float.NEGATIVE_INFINITY;
+      for (int i = 0; i < numNodes; i++) {
+        scores[i] = score(nodes[i]);
+        max = Math.max(max, scores[i]);
+      }
+      return max;
+    }
+
+    @Override
+    public int maxOrd() {
+      return positions.length;
+    }
   }
 
   private void assertScoresEqual(float[] scores, NeighborArray neighbors) {
