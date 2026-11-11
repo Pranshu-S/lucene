@@ -237,6 +237,105 @@ public class OptimizedScalarQuantizer {
   }
 
   /**
+   * Quantize the residual error left behind by a primary quantization of {@code vector}, as in
+   * two-level LVQ from <a href="https://arxiv.org/abs/2304.04759">Similarity search in the blink of
+   * an eye with compressed indices</a>. Adding the dequantized residual to the dequantized primary
+   * vector (see {@link #deQuantize(byte[], byte[], float[], byte, float, float, byte, float, float,
+   * float[])}) yields a higher fidelity reconstruction of {@code vector} than the primary
+   * quantization alone, for example to rescore candidates when the raw vectors are not available.
+   *
+   * <p>The residual of each component is {@code (vector[i] - centroid[i]) - p[i]}, where {@code p}
+   * is the dequantized primary vector without the centroid. Components that lie inside the primary
+   * interval have a residual of at most half a primary step, but the primary interval is chosen by
+   * coordinate descent and usually clamps some components, leaving them with a much larger
+   * residual. Fixed bounds of half a primary step, or bounds that are themselves optimized, would
+   * clamp those components again, and they tend to be the largest magnitude components of the
+   * vector. So the residual interval is the range of the residual instead, which bounds the error
+   * of every component of the reconstruction by half a residual step. The resulting interval must
+   * be stored alongside the residual.
+   *
+   * @param vector raw vector, overwritten with the residual
+   * @param centroid centroid that was used for the primary quantization
+   * @param primary the primary quantized vector, one unpacked value per component
+   * @param primaryBits number of bits used for the primary quantization
+   * @param primaryResult the result of the primary quantization
+   * @param destination destination to store the quantized residual
+   * @param bits number of bits to quantize the residual
+   * @return quantization result of the residual. The additional correction is the one of the
+   *     primary quantization, as the corrective terms describe the original vector.
+   */
+  public static QuantizationResult scalarQuantizeResidual(
+      float[] vector,
+      float[] centroid,
+      byte[] primary,
+      byte primaryBits,
+      QuantizationResult primaryResult,
+      byte[] destination,
+      byte bits) {
+    assert vector.length <= primary.length && vector.length <= destination.length;
+    assert primaryBits > 0 && primaryBits <= 8;
+    assert bits > 0 && bits <= 8;
+    double primaryStep =
+        (primaryResult.upperInterval() - primaryResult.lowerInterval())
+            / (double) ((1 << primaryBits) - 1);
+    float min = Float.MAX_VALUE;
+    float max = -Float.MAX_VALUE;
+    for (int i = 0; i < vector.length; ++i) {
+      // same arithmetic as deQuantize so that the reconstruction cancels the primary
+      double p = (primary[i] & 0xFF) * primaryStep + primaryResult.lowerInterval();
+      vector[i] = (float) (vector[i] - centroid[i] - p);
+      min = Math.min(min, vector[i]);
+      max = Math.max(max, vector[i]);
+    }
+    double step = (max - min) / (double) ((1 << bits) - 1);
+    int sum = 0;
+    for (int h = 0; h < vector.length; h++) {
+      int assignment = step == 0 ? 0 : (int) Math.round((vector[h] - min) / step);
+      sum += assignment;
+      destination[h] = (byte) assignment;
+    }
+    return new QuantizationResult(min, max, primaryResult.additionalCorrection(), sum);
+  }
+
+  /**
+   * Dequantizes a primary quantized vector and its quantized residual, see {@link
+   * #scalarQuantizeResidual}, back to float values.
+   *
+   * @param quantized the primary quantized vector, one unpacked value per component
+   * @param residual the quantized residual, one unpacked value per component
+   * @param dequantized the output array to store dequantized float values
+   * @param bits the number of bits used for the primary quantization
+   * @param lowerInterval lower value of the primary quantization range
+   * @param upperInterval upper value of the primary quantization range
+   * @param residualBits the number of bits used for the residual quantization
+   * @param residualLowerInterval lower value of the residual quantization range
+   * @param residualUpperInterval upper value of the residual quantization range
+   * @param centroid the centroid vector that was subtracted during quantization
+   * @return the dequantized float array (same as dequantized parameter)
+   */
+  public static float[] deQuantize(
+      byte[] quantized,
+      byte[] residual,
+      float[] dequantized,
+      byte bits,
+      float lowerInterval,
+      float upperInterval,
+      byte residualBits,
+      float residualLowerInterval,
+      float residualUpperInterval,
+      float[] centroid) {
+    double step = (upperInterval - lowerInterval) / (double) ((1 << bits) - 1);
+    double residualStep =
+        (residualUpperInterval - residualLowerInterval) / (double) ((1 << residualBits) - 1);
+    for (int h = 0; h < quantized.length; h++) {
+      double xi = (quantized[h] & 0xFF) * step + lowerInterval;
+      double ri = (residual[h] & 0xFF) * residualStep + residualLowerInterval;
+      dequantized[h] = (float) (xi + ri + centroid[h]);
+    }
+    return dequantized;
+  }
+
+  /**
    * Dequantizes a quantized byte vector back to float values.
    *
    * <p>This method reconstructs float vectors from their quantized byte representation using linear

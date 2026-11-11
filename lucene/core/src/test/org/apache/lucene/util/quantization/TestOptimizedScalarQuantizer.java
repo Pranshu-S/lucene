@@ -22,6 +22,7 @@ import static com.carrotsearch.randomizedtesting.RandomizedTest.randomIntBetween
 import static org.apache.lucene.util.quantization.OptimizedScalarQuantizer.MINIMUM_MSE_GRID;
 import static org.apache.lucene.util.quantization.OptimizedScalarQuantizer.deQuantize;
 import static org.apache.lucene.util.quantization.OptimizedScalarQuantizer.packAsBinary;
+import static org.apache.lucene.util.quantization.OptimizedScalarQuantizer.scalarQuantizeResidual;
 import static org.apache.lucene.util.quantization.OptimizedScalarQuantizer.unpackBinary;
 
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -284,6 +285,191 @@ public class TestOptimizedScalarQuantizer extends LuceneTestCase {
         where + " quantizedComponentSum",
         expected.quantizedComponentSum(),
         actual.quantizedComponentSum());
+  }
+
+  public void testResidualQuantizationErrorBound() {
+    int dims = randomIntBetween(1, 1024);
+    float[] vector = new float[dims];
+    float[] centroid = new float[dims];
+    // a zero centroid emulates data-blind quantization
+    boolean centered = randomBoolean();
+    for (int i = 0; i < dims; ++i) {
+      vector[i] = (float) random().nextGaussian();
+      centroid[i] = centered ? randomFloat() : 0f;
+    }
+    OptimizedScalarQuantizer osq = new OptimizedScalarQuantizer(VectorSimilarityFunction.EUCLIDEAN);
+    for (byte bits : ALL_BITS) {
+      byte[] primary = new byte[dims];
+      OptimizedScalarQuantizer.QuantizationResult result =
+          osq.scalarQuantize(vector.clone(), primary, bits, centroid);
+      float[] primaryOnly =
+          deQuantize(
+              primary,
+              new float[dims],
+              bits,
+              result.lowerInterval(),
+              result.upperInterval(),
+              centroid);
+      float primaryMaxError = maxAbsError(vector, primaryOnly);
+      for (byte residualBits : ALL_BITS) {
+        byte[] residual = new byte[dims];
+        OptimizedScalarQuantizer.QuantizationResult residualResult =
+            scalarQuantizeResidual(
+                vector.clone(), centroid, primary, bits, result, residual, residualBits);
+        assertValidResults(residualResult);
+        assertValidQuantizedRange(residual, residualBits);
+        assertEquals(result.additionalCorrection(), residualResult.additionalCorrection(), 0f);
+        float[] reconstructed =
+            deQuantize(
+                primary,
+                residual,
+                new float[dims],
+                bits,
+                result.lowerInterval(),
+                result.upperInterval(),
+                residualBits,
+                residualResult.lowerInterval(),
+                residualResult.upperInterval(),
+                centroid);
+        String where = "bits=" + bits + " residualBits=" + residualBits + " dims=" + dims;
+        // every component is within half a residual step, which never exceeds the primary error
+        float halfStep =
+            (residualResult.upperInterval() - residualResult.lowerInterval())
+                / ((1 << residualBits) - 1)
+                / 2;
+        float maxError = maxAbsError(vector, reconstructed);
+        assertTrue(where + " error=" + maxError, maxError <= halfStep + 1e-5f);
+        assertTrue(where + " error=" + maxError, maxError <= primaryMaxError + 1e-5f);
+      }
+    }
+  }
+
+  public void testResidualIntervalCoversClampedComponents() {
+    // the primary interval clamps the large first component, leaving it with a residual larger
+    // than half a primary step
+    int dims = 64;
+    float[] vector = new float[dims];
+    for (int i = 0; i < dims; ++i) {
+      vector[i] = -1f + 2f * i / (dims - 1);
+    }
+    vector[0] = 3f;
+    float[] centroid = new float[dims];
+    OptimizedScalarQuantizer osq = new OptimizedScalarQuantizer(VectorSimilarityFunction.EUCLIDEAN);
+    for (byte bits : new byte[] {1, 2, 4}) {
+      byte[] primary = new byte[dims];
+      OptimizedScalarQuantizer.QuantizationResult result =
+          osq.scalarQuantize(vector.clone(), primary, bits, centroid);
+      float primaryResidual = vector[0] - result.upperInterval();
+      float halfPrimaryStep =
+          (result.upperInterval() - result.lowerInterval()) / ((1 << bits) - 1) / 2;
+      assertTrue(primaryResidual > halfPrimaryStep);
+
+      byte residualBits = 4;
+      byte[] residual = new byte[dims];
+      OptimizedScalarQuantizer.QuantizationResult residualResult =
+          scalarQuantizeResidual(
+              vector.clone(), centroid, primary, bits, result, residual, residualBits);
+      assertEquals(primaryResidual, residualResult.upperInterval(), 1e-6f);
+      float[] reconstructed =
+          deQuantize(
+              primary,
+              residual,
+              new float[dims],
+              bits,
+              result.lowerInterval(),
+              result.upperInterval(),
+              residualBits,
+              residualResult.lowerInterval(),
+              residualResult.upperInterval(),
+              centroid);
+      assertEquals(vector[0], reconstructed[0], 1e-5f);
+    }
+  }
+
+  public void testDeQuantizeWithResidualIsSumOfParts() {
+    int dims = randomIntBetween(1, 512);
+    byte bits = ALL_BITS[random().nextInt(ALL_BITS.length)];
+    byte residualBits = ALL_BITS[random().nextInt(ALL_BITS.length)];
+    byte[] primary = new byte[dims];
+    byte[] residual = new byte[dims];
+    float[] centroid = new float[dims];
+    for (int i = 0; i < dims; ++i) {
+      primary[i] = (byte) random().nextInt(1 << bits);
+      residual[i] = (byte) random().nextInt(1 << residualBits);
+      centroid[i] = randomFloat();
+    }
+    float lower = -randomFloat();
+    float upper = randomFloat();
+    float residualLower = -randomFloat() / 10;
+    float residualUpper = randomFloat() / 10;
+    float[] primaryOnly = deQuantize(primary, new float[dims], bits, lower, upper, centroid);
+    float[] residualOnly =
+        deQuantize(
+            residual, new float[dims], residualBits, residualLower, residualUpper, new float[dims]);
+    float[] combined =
+        deQuantize(
+            primary,
+            residual,
+            new float[dims],
+            bits,
+            lower,
+            upper,
+            residualBits,
+            residualLower,
+            residualUpper,
+            centroid);
+    for (int i = 0; i < dims; ++i) {
+      assertEquals(primaryOnly[i] + residualOnly[i], combined[i], 1e-5f);
+    }
+  }
+
+  public void testResidualQuantizationEdgeCases() {
+    OptimizedScalarQuantizer osq = new OptimizedScalarQuantizer(VectorSimilarityFunction.EUCLIDEAN);
+    // zero vector: the primary quantization is exact, so is the reconstruction
+    float[] zeros = new float[128];
+    for (byte bits : ALL_BITS) {
+      byte[] primary = new byte[zeros.length];
+      OptimizedScalarQuantizer.QuantizationResult result =
+          osq.scalarQuantize(zeros.clone(), primary, bits, zeros);
+      byte[] residual = new byte[zeros.length];
+      OptimizedScalarQuantizer.QuantizationResult residualResult =
+          scalarQuantizeResidual(zeros.clone(), zeros, primary, bits, result, residual, bits);
+      assertValidResults(residualResult);
+      float[] reconstructed =
+          deQuantize(
+              primary,
+              residual,
+              new float[zeros.length],
+              bits,
+              result.lowerInterval(),
+              result.upperInterval(),
+              bits,
+              residualResult.lowerInterval(),
+              residualResult.upperInterval(),
+              zeros);
+      assertArrayEquals(zeros, reconstructed, 0f);
+    }
+    // single dimension
+    for (byte bits : ALL_BITS) {
+      float[] vector = new float[] {randomFloat()};
+      float[] centroid = new float[] {randomFloat()};
+      byte[] primary = new byte[1];
+      OptimizedScalarQuantizer.QuantizationResult result =
+          osq.scalarQuantize(vector.clone(), primary, bits, centroid);
+      byte[] residual = new byte[1];
+      OptimizedScalarQuantizer.QuantizationResult residualResult =
+          scalarQuantizeResidual(vector.clone(), centroid, primary, bits, result, residual, bits);
+      assertValidResults(residualResult);
+      assertValidQuantizedRange(residual, bits);
+    }
+  }
+
+  private static float maxAbsError(float[] expected, float[] actual) {
+    float error = 0;
+    for (int i = 0; i < expected.length; ++i) {
+      error = Math.max(error, Math.abs(expected[i] - actual[i]));
+    }
+    return error;
   }
 
   public void testUnpackBinary() {

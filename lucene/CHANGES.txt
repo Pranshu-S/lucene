@@ -228,6 +228,10 @@ API Changes
 
 New Features
 ---------------------
+* GITHUB#16029: Add residual quantization to OptimizedScalarQuantizer: the error left by a primary
+  quantization can be quantized separately, and the primary and residual dequantized together into a
+  higher fidelity reconstruction of the vector. (Pranshu Shukla)
+
 * GITHUB#16723: Support SIMD Faiss library variants with runtime fallback. (Abhinav Chinnala)
 
 * GITHUB#16241: Add HangulCompositionCharFilter to analysis-nori for opt-in composition of
