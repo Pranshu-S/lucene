@@ -28,6 +28,8 @@ import java.io.IOException;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.lucene.codecs.KnnVectorsFormat;
 import org.apache.lucene.document.Document;
@@ -45,7 +47,9 @@ import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.MultiReader;
 import org.apache.lucene.index.NoMergePolicy;
+import org.apache.lucene.index.ParallelLeafReader;
 import org.apache.lucene.index.QueryTimeout;
 import org.apache.lucene.index.SerialMergeScheduler;
 import org.apache.lucene.index.StoredFields;
@@ -65,6 +69,7 @@ import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.NamedThreadFactory;
 
 /** Test cases for AbstractKnnVectorQuery objects. */
 abstract class BaseKnnVectorQueryTestCase extends LuceneTestCase {
@@ -172,6 +177,44 @@ abstract class BaseKnnVectorQueryTestCase extends LuceneTestCase {
       assertTrue(q instanceof MatchNoDocsQuery);
       assertEquals(
           "MatchNoDocsQuery(\"No documents matched the nearest-neighbor search\")", q.toString());
+    }
+  }
+
+  /**
+   * Tests that a AbstractKnnVectorQuery over a composite reader whose leaves are all empty (maxDoc
+   * 0) is rewritten to a MatchNoDocsQuery.
+   */
+  public void testEmptyLeavesInCompositeReader() throws IOException {
+    ExecutorService executor =
+        Executors.newFixedThreadPool(2, new NamedThreadFactory("testEmptyLeaves"));
+    AbstractKnnVectorQuery kvq = getKnnVectorQuery("field", new float[] {1, 0}, 3);
+    try (Directory indexStore = getIndexStore("field", new float[] {1, 0}, new float[] {0, 1})) {
+      try (IndexReader reader = new MultiReader(new ParallelLeafReader())) {
+        assertEquals(0, reader.maxDoc());
+        IndexSearcher searcher = new IndexSearcher(reader, executor);
+        assertTrue(searcher.rewrite(kvq) instanceof MatchNoDocsQuery);
+      }
+      // an empty sub-reader nested in a non-empty composite reader
+      try (IndexReader reader =
+          new MultiReader(
+              new MultiReader(new ParallelLeafReader()), DirectoryReader.open(indexStore))) {
+        IndexSearcher searcher = new IndexSearcher(reader, executor);
+        Weight weight =
+            searcher.rewrite(kvq).createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, 1f);
+        int count = 0;
+        for (LeafReaderContext ctx : reader.leaves()) {
+          Scorer scorer = weight.scorer(ctx);
+          if (scorer != null) {
+            DocIdSetIterator it = scorer.iterator();
+            while (it.nextDoc() != NO_MORE_DOCS) {
+              count++;
+            }
+          }
+        }
+        assertEquals(2, count);
+      }
+    } finally {
+      TestUtil.shutdownExecutorService(executor);
     }
   }
 

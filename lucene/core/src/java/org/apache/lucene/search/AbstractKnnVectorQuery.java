@@ -272,8 +272,7 @@ abstract class AbstractKnnVectorQuery extends Query {
     final int perLeafTopK;
     // ctx.parent could be null if this is a MemoryIndex
     if (ctx.parent != null) {
-      float leafProportion = ctx.reader().maxDoc() / (float) ctx.parent.reader().maxDoc();
-      perLeafTopK = perLeafTopKCalculation(k, leafProportion);
+      perLeafTopK = perLeafTopKCalculation(k, leafProportion(ctx));
       // We don't have a good way to estimate perLeafTopK here, so just do approximate search
     } else {
       perLeafTopK = k;
@@ -322,16 +321,21 @@ abstract class AbstractKnnVectorQuery extends Query {
       // The delegate supports optimistic collection
       // ctx.parent could be null if this is a MemoryIndex
       if (delegate.isOptimistic() && context.parent != null) {
-        @SuppressWarnings("resource")
-        float leafProportion = context.reader().maxDoc() / (float) context.parent.reader().maxDoc();
-        int perLeafTopK = perLeafTopKCalculation(k, leafProportion);
-        // if we divided by zero above, leafProportion can be NaN and then this would be 0
+        int perLeafTopK = perLeafTopKCalculation(k, leafProportion(context));
         assert perLeafTopK > 0;
         return delegate.newOptimisticCollector(visitedLimit, searchStrategy, context, perLeafTopK);
       }
       // We don't support optimistic collection, so just do regular execution path
       return delegate.newCollector(visitedLimit, searchStrategy, context);
     }
+  }
+
+  /** Returns the proportion of its parent reader's documents held by the given leaf. */
+  @SuppressWarnings("resource")
+  private static float leafProportion(LeafReaderContext ctx) {
+    int parentMaxDoc = ctx.parent.reader().maxDoc();
+    // the parent has no documents when all its leaves are empty; avoid a NaN 0/0 proportion
+    return parentMaxDoc == 0 ? 0 : ctx.reader().maxDoc() / (float) parentMaxDoc;
   }
 
   /*

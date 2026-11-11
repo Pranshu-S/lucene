@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: Fix kNN vector queries failing on a composite reader whose leaves all have maxDoc 0,
+  where the per-leaf top-k estimate divided 0 by 0. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 
