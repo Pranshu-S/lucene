@@ -121,56 +121,33 @@ public class OptimizedScalarQuantizer {
     assert similarityFunction != COSINE || VectorUtil.isUnitVector(vector);
     assert similarityFunction != COSINE || VectorUtil.isUnitVector(centroid);
     assert bits.length == destinations.length;
-    float[] intervalScratch = new float[2];
-    double vecMean = 0;
-    double vecVar = 0;
-    float norm2 = 0;
-    float centroidDot = 0;
-    float min = Float.MAX_VALUE;
-    float max = -Float.MAX_VALUE;
-    for (int i = 0; i < vector.length; ++i) {
-      if (similarityFunction != EUCLIDEAN) {
-        centroidDot += vector[i] * centroid[i];
-      }
-      vector[i] = vector[i] - centroid[i];
-      min = Math.min(min, vector[i]);
-      max = Math.max(max, vector[i]);
-      norm2 += (vector[i] * vector[i]);
-      double delta = vector[i] - vecMean;
-      vecMean += delta / (i + 1);
-      vecVar += delta * (vector[i] - vecMean);
-    }
-    vecVar /= vector.length;
-    double vecStd = Math.sqrt(vecVar);
+    return multiQuantizeCentered(vector, center(vector, centroid), destinations, bits);
+  }
+
+  /**
+   * Quantize the float16 vector to the multiple bit levels. Equivalent to widening {@code vector}
+   * to fp32 and calling {@link #multiScalarQuantize(float[], byte[][], byte[], float[])}, with the
+   * same results, but widens each component as it centers it instead of in a separate pass.
+   *
+   * @param vector raw vector, as float16 bit patterns
+   * @param centered scratch of {@code vector.length} floats; overwritten with the centered vector
+   * @param destinations array of destinations to store the quantized vector
+   * @param bits array of bits to quantize the vector
+   * @param centroid centroid to center the vector
+   * @return array of quantization results
+   */
+  public QuantizationResult[] multiScalarQuantize(
+      short[] vector, float[] centered, byte[][] destinations, byte[] bits, float[] centroid) {
+    assert similarityFunction != COSINE || VectorUtil.isUnitVector(centroid);
+    assert bits.length == destinations.length;
+    return multiQuantizeCentered(centered, center(vector, centered, centroid), destinations, bits);
+  }
+
+  private QuantizationResult[] multiQuantizeCentered(
+      float[] centered, CenteredStats stats, byte[][] destinations, byte[] bits) {
     QuantizationResult[] results = new QuantizationResult[bits.length];
     for (int i = 0; i < bits.length; ++i) {
-      assert bits[i] > 0 && bits[i] <= 8;
-      int points = (1 << bits[i]);
-      // Linearly scale the interval to the standard deviation of the vector, ensuring we are within
-      // the min/max bounds
-      intervalScratch[0] =
-          (float) clamp(MINIMUM_MSE_GRID[bits[i] - 1][0] * vecStd + vecMean, min, max);
-      intervalScratch[1] =
-          (float) clamp(MINIMUM_MSE_GRID[bits[i] - 1][1] * vecStd + vecMean, min, max);
-      optimizeIntervals(intervalScratch, vector, norm2, points);
-      float nSteps = ((1 << bits[i]) - 1);
-      float a = intervalScratch[0];
-      float b = intervalScratch[1];
-      float step = (b - a) / nSteps;
-      int sumQuery = 0;
-      // Now we have the optimized intervals, quantize the vector
-      for (int h = 0; h < vector.length; h++) {
-        float xi = (float) clamp(vector[h], a, b);
-        int assignment = Math.round((xi - a) / step);
-        sumQuery += assignment;
-        destinations[i][h] = (byte) assignment;
-      }
-      results[i] =
-          new QuantizationResult(
-              intervalScratch[0],
-              intervalScratch[1],
-              similarityFunction == EUCLIDEAN ? norm2 : centroidDot,
-              sumQuery);
+      results[i] = quantizeCentered(centered, stats, destinations[i], bits[i]);
     }
     return results;
   }
@@ -189,9 +166,41 @@ public class OptimizedScalarQuantizer {
     assert similarityFunction != COSINE || VectorUtil.isUnitVector(vector);
     assert similarityFunction != COSINE || VectorUtil.isUnitVector(centroid);
     assert vector.length <= destination.length;
-    assert bits > 0 && bits <= 8;
-    float[] intervalScratch = new float[2];
-    int points = 1 << bits;
+    return quantizeCentered(vector, center(vector, centroid), destination, bits);
+  }
+
+  /**
+   * Quantize the float16 vector to the given bit level. Equivalent to widening {@code vector} to
+   * fp32 and calling {@link #scalarQuantize(float[], byte[], byte, float[])}, with the same
+   * results, but widens each component as it centers it instead of in a separate pass.
+   *
+   * <p>For {@link VectorSimilarityFunction#COSINE} the vector must already be unit length, as for
+   * the fp32 overload, which a float16 vector usually is not exactly. Normalize in fp32 and use the
+   * fp32 overload instead.
+   *
+   * @param vector raw vector, as float16 bit patterns
+   * @param centered scratch of {@code vector.length} floats; overwritten with the centered vector
+   * @param destination destination to store the quantized vector
+   * @param bits number of bits to quantize the vector
+   * @param centroid centroid to center the vector
+   * @return quantization result
+   */
+  public QuantizationResult scalarQuantize(
+      short[] vector, float[] centered, byte[] destination, byte bits, float[] centroid) {
+    assert similarityFunction != COSINE || VectorUtil.isUnitVector(centroid);
+    assert vector.length <= destination.length;
+    return quantizeCentered(centered, center(vector, centered, centroid), destination, bits);
+  }
+
+  /**
+   * Summary of a centered vector: the running mean and standard deviation, extremes and squared
+   * norm of its components, and the dot product of the raw vector with the centroid.
+   */
+  private record CenteredStats(
+      double mean, double std, float min, float max, float norm2, float centroidDot) {}
+
+  /** Centers {@code vector} on {@code centroid} in place and summarizes it. */
+  private CenteredStats center(float[] vector, float[] centroid) {
     double vecMean = 0;
     double vecVar = 0;
     float norm2 = 0;
@@ -211,20 +220,60 @@ public class OptimizedScalarQuantizer {
       vecVar += delta * (vector[i] - vecMean);
     }
     vecVar /= vector.length;
-    double vecStd = Math.sqrt(vecVar);
+    return new CenteredStats(vecMean, Math.sqrt(vecVar), min, max, norm2, centroidDot);
+  }
+
+  /**
+   * Widens the float16 {@code vector}, centers it on {@code centroid} into {@code centered} and
+   * summarizes it, performing the same fp32 operations as {@link #center(float[], float[])}.
+   */
+  private CenteredStats center(short[] vector, float[] centered, float[] centroid) {
+    assert centered.length == vector.length;
+    double vecMean = 0;
+    double vecVar = 0;
+    float norm2 = 0;
+    float centroidDot = 0;
+    float min = Float.MAX_VALUE;
+    float max = -Float.MAX_VALUE;
+    for (int i = 0; i < vector.length; ++i) {
+      float value = Float.float16ToFloat(vector[i]);
+      if (similarityFunction != EUCLIDEAN) {
+        centroidDot += value * centroid[i];
+      }
+      float c = value - centroid[i];
+      centered[i] = c;
+      min = Math.min(min, c);
+      max = Math.max(max, c);
+      norm2 += (c * c);
+      double delta = c - vecMean;
+      vecMean += delta / (i + 1);
+      vecVar += delta * (c - vecMean);
+    }
+    vecVar /= vector.length;
+    return new CenteredStats(vecMean, Math.sqrt(vecVar), min, max, norm2, centroidDot);
+  }
+
+  /** Quantizes the centered vector summarized by {@code stats} to the given bit level. */
+  private QuantizationResult quantizeCentered(
+      float[] centered, CenteredStats stats, byte[] destination, byte bits) {
+    assert bits > 0 && bits <= 8;
+    float[] intervalScratch = new float[2];
+    int points = 1 << bits;
     // Linearly scale the interval to the standard deviation of the vector, ensuring we are within
     // the min/max bounds
-    intervalScratch[0] = (float) clamp(MINIMUM_MSE_GRID[bits - 1][0] * vecStd + vecMean, min, max);
-    intervalScratch[1] = (float) clamp(MINIMUM_MSE_GRID[bits - 1][1] * vecStd + vecMean, min, max);
-    optimizeIntervals(intervalScratch, vector, norm2, points);
+    intervalScratch[0] =
+        (float) clamp(MINIMUM_MSE_GRID[bits - 1][0] * stats.std + stats.mean, stats.min, stats.max);
+    intervalScratch[1] =
+        (float) clamp(MINIMUM_MSE_GRID[bits - 1][1] * stats.std + stats.mean, stats.min, stats.max);
+    optimizeIntervals(intervalScratch, centered, stats.norm2, points);
     float nSteps = ((1 << bits) - 1);
     // Now we have the optimized intervals, quantize the vector
     float a = intervalScratch[0];
     float b = intervalScratch[1];
     float step = (b - a) / nSteps;
     int sumQuery = 0;
-    for (int h = 0; h < vector.length; h++) {
-      float xi = (float) clamp(vector[h], a, b);
+    for (int h = 0; h < centered.length; h++) {
+      float xi = (float) clamp(centered[h], a, b);
       int assignment = Math.round((xi - a) / step);
       sumQuery += assignment;
       destination[h] = (byte) assignment;
@@ -232,7 +281,7 @@ public class OptimizedScalarQuantizer {
     return new QuantizationResult(
         intervalScratch[0],
         intervalScratch[1],
-        similarityFunction == EUCLIDEAN ? norm2 : centroidDot,
+        similarityFunction == EUCLIDEAN ? stats.norm2 : stats.centroidDot,
         sumQuery);
   }
 

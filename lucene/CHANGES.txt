@@ -303,6 +303,11 @@ Optimizations
 * GITHUB#16746: Speed up decoding long overlapping LZ4 matches using bulk copies
   of initialized bytes. (Andre Kurait)
 
+* GITHUB#16533: Lucene104ScalarQuantizedVectorsWriter quantizes FLOAT16 vectors straight from
+  their float16 components, widening each one as it centers it, instead of inflating every vector
+  to a float[] first, and sums the merged centroid the same way. COSINE vectors are still inflated
+  to be normalized. The quantized vectors are unchanged. (Pranshu Shukla)
+
 * GITHUB#16881: UnifiedHighlighter converts each term to UTF-16 once instead of once per automaton,
   which speeds up highlighting of queries with many multi-term clauses. (Eugene Rizhkov)
 

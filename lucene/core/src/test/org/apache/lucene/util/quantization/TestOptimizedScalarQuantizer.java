@@ -264,6 +264,52 @@ public class TestOptimizedScalarQuantizer extends LuceneTestCase {
     }
   }
 
+  public void testFloat16QuantizeMatchesInflatedFloat() {
+    for (int trial = 0; trial < 25; trial++) {
+      int dims = randomIntBetween(1, 1024);
+      short[] vector = new short[dims];
+      float[] inflated = new float[dims];
+      float[] centroid = new float[dims];
+      float scale = randomFloat() * 100;
+      for (int i = 0; i < dims; ++i) {
+        vector[i] = Float.floatToFloat16((randomFloat() - 0.5f) * scale);
+        inflated[i] = Float.float16ToFloat(vector[i]);
+        centroid[i] = (randomFloat() - 0.5f) * scale;
+      }
+      for (VectorSimilarityFunction similarityFunction : VectorSimilarityFunction.values()) {
+        if (similarityFunction == VectorSimilarityFunction.COSINE) {
+          // COSINE vectors are normalized in fp32, so they are never quantized from fp16
+          continue;
+        }
+        OptimizedScalarQuantizer osq = new OptimizedScalarQuantizer(similarityFunction);
+        float[] centered = new float[dims];
+        for (byte bits : ALL_BITS) {
+          String where = similarityFunction + " dims=" + dims + " bits=" + bits;
+          byte[] expected = new byte[dims];
+          OptimizedScalarQuantizer.QuantizationResult expectedResult =
+              osq.scalarQuantize(inflated.clone(), expected, bits, centroid);
+          byte[] actual = new byte[dims];
+          OptimizedScalarQuantizer.QuantizationResult actualResult =
+              osq.scalarQuantize(vector, centered, actual, bits, centroid);
+          assertArrayEquals(where, expected, actual);
+          assertIdenticalResults(where, expectedResult, actualResult);
+        }
+        byte[] bits = new byte[] {1, 4};
+        byte[][] expected = new byte[][] {new byte[dims], new byte[dims]};
+        OptimizedScalarQuantizer.QuantizationResult[] expectedResults =
+            osq.multiScalarQuantize(inflated.clone(), expected, bits, centroid);
+        byte[][] actual = new byte[][] {new byte[dims], new byte[dims]};
+        OptimizedScalarQuantizer.QuantizationResult[] actualResults =
+            osq.multiScalarQuantize(vector, centered, actual, bits, centroid);
+        for (int i = 0; i < bits.length; i++) {
+          String where = similarityFunction + " dims=" + dims + " bits=" + bits[i] + " (multi)";
+          assertArrayEquals(where, expected[i], actual[i]);
+          assertIdenticalResults(where, expectedResults[i], actualResults[i]);
+        }
+      }
+    }
+  }
+
   private static void assertIdenticalResults(
       String where,
       OptimizedScalarQuantizer.QuantizationResult expected,

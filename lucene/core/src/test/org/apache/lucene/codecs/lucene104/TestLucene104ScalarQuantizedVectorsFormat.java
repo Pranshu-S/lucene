@@ -49,6 +49,7 @@ import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.LeafReader;
+import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.NoMergePolicy;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -437,6 +438,80 @@ public class TestLucene104ScalarQuantizedVectorsFormat extends BaseKnnVectorsFor
                 corrections.quantizedComponentSum(), actualCorrections.quantizedComponentSum());
           }
         }
+      }
+    }
+  }
+
+  /**
+   * The writer quantizes float16 vectors without inflating them to fp32 first, except for COSINE.
+   * It must still produce exactly what quantizing the inflated vectors does: a float16 field and a
+   * float32 field holding the same inflated values must get bit-identical centroids, quantized
+   * bytes and corrective terms, on flush and on merge, with and without deletions.
+   */
+  public void testFloat16QuantizesLikeInflatedFloat32() throws IOException {
+    int dims = random().nextInt(1, 200);
+    int numDocs = random().nextInt(50, 600);
+    VectorSimilarityFunction similarityFunction = randomSimilarity();
+    // the HNSW format quantizes query-side records too when merging, from the same vectors
+    KnnVectorsFormat knnFormat =
+        random().nextBoolean()
+            ? format
+            : new Lucene104HnswScalarQuantizedVectorsFormat(encoding, 16, 100, 1, null, 0);
+    try (Directory dir = newDirectory()) {
+      IndexWriterConfig iwc =
+          newIndexWriterConfig().setCodec(TestUtil.alwaysKnnVectorsFormat(knnFormat));
+      try (IndexWriter w = new IndexWriter(dir, iwc)) {
+        for (int i = 0; i < numDocs; i++) {
+          short[] float16 = randomNormalizedFloat16Vector(dims);
+          float[] inflated = new float[dims];
+          for (int j = 0; j < dims; j++) {
+            inflated[j] = Float.float16ToFloat(float16[j]);
+          }
+          Document doc = new Document();
+          doc.add(new StringField("id", Integer.toString(i), Field.Store.NO));
+          doc.add(new KnnFloat16VectorField("f16", float16, similarityFunction));
+          doc.add(new KnnFloatVectorField("f32", inflated, similarityFunction));
+          w.addDocument(doc);
+          if (random().nextInt(100) == 0) {
+            w.commit();
+          }
+        }
+        w.commit();
+        try (IndexReader reader = DirectoryReader.open(w)) {
+          assertQuantizedIdentically(reader);
+        }
+        if (random().nextBoolean()) {
+          // forces the merge to recompute the centroid from the live vectors
+          for (int i = 0; i < numDocs; i += random().nextInt(1, 10)) {
+            w.deleteDocuments(new Term("id", Integer.toString(i)));
+          }
+        }
+        w.forceMerge(1);
+        try (IndexReader reader = DirectoryReader.open(w)) {
+          assertQuantizedIdentically(reader);
+        }
+      }
+    }
+  }
+
+  private static void assertQuantizedIdentically(IndexReader reader) throws IOException {
+    for (LeafReaderContext ctx : reader.leaves()) {
+      KnnVectorsReader vectorsReader = ((CodecReader) ctx.reader()).getVectorReader();
+      QuantizedByteVectorValues expected =
+          ((Lucene104ScalarQuantizedVectorsReader.ScalarQuantizedVectorValues)
+                  vectorsReader.getFloatVectorValues("f32"))
+              .getQuantizedVectorValues();
+      QuantizedByteVectorValues actual =
+          ((Lucene104ScalarQuantizedVectorsReader.ScalarQuantizedFloat16VectorValues)
+                  vectorsReader.getFloat16VectorValues("f16"))
+              .getQuantizedVectorValues();
+      assertEquals(expected.size(), actual.size());
+      assertArrayEquals(expected.getCentroid(), actual.getCentroid(), 0f);
+      for (int ord = 0; ord < expected.size(); ord++) {
+        assertEquals(expected.ordToDoc(ord), actual.ordToDoc(ord));
+        assertArrayEquals(expected.vectorValue(ord), actual.vectorValue(ord));
+        // QuantizationResult is a record of floats and an int, so equals compares the bits
+        assertEquals(expected.getCorrectiveTerms(ord), actual.getCorrectiveTerms(ord));
       }
     }
   }
