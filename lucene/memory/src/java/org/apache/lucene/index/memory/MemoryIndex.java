@@ -791,7 +791,9 @@ public class MemoryIndex {
   }
 
   private void storeVectorValues(Info info, IndexableField vectorField) {
-    assert vectorField instanceof KnnFloatVectorField || vectorField instanceof KnnByteVectorField;
+    assert vectorField instanceof KnnFloatVectorField
+        || vectorField instanceof KnnFloat16VectorField
+        || vectorField instanceof KnnByteVectorField;
     switch (info.fieldInfo.getVectorEncoding()) {
       case BYTE -> {
         if (vectorField instanceof KnnByteVectorField byteVectorField) {

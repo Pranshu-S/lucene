@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: MemoryIndex no longer trips an assertion when indexing a KnnFloat16VectorField.
+  (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 

@@ -46,6 +46,7 @@ import org.apache.lucene.document.IntField;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
+import org.apache.lucene.document.KnnFloat16VectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.NumericDocValuesField;
@@ -60,6 +61,7 @@ import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.ByteVectorValues;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInvertState;
+import org.apache.lucene.index.Float16VectorValues;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
@@ -818,6 +820,53 @@ public class TestMemoryIndex extends LuceneTestCaseJupiter {
             .search(new KnnFloatVectorQuery("knnFloatA", new float[] {1.0f, 1.0f}, 1), 10);
     // we don't really do knn search right now for MemoryIndex
     assertEquals(0, docs.totalHits.value());
+  }
+
+  @Test
+  public void testKnnFloat16VectorOnlyOneVectorAllowed() throws IOException {
+    Document doc = new Document();
+    doc.add(
+        new KnnFloat16VectorField(
+            "knnFloat16A", float16(1.0f, 2.0f), VectorSimilarityFunction.EUCLIDEAN));
+    doc.add(
+        new KnnFloat16VectorField(
+            "knnFloat16A", float16(3.0f, 4.0f), VectorSimilarityFunction.EUCLIDEAN));
+    expectThrows(
+        IllegalArgumentException.class,
+        () -> MemoryIndex.fromDocument(doc, new StandardAnalyzer()));
+  }
+
+  @Test
+  public void testKnnFloat16Vectors() throws IOException {
+    Document doc = new Document();
+    doc.add(
+        new KnnFloat16VectorField(
+            "knnFloat16A", float16(1.0f, 2.0f), VectorSimilarityFunction.EUCLIDEAN));
+    doc.add(
+        new KnnFloat16VectorField(
+            "knnFloat16B", float16(3.0f, 4.0f, 5.0f), VectorSimilarityFunction.DOT_PRODUCT));
+
+    MemoryIndex mi = MemoryIndex.fromDocument(doc, new StandardAnalyzer());
+    LeafReader reader = mi.createSearcher().getIndexReader().leaves().get(0).reader();
+    for (short[] expected : new short[][] {float16(1.0f, 2.0f), float16(3.0f, 4.0f, 5.0f)}) {
+      String field = expected.length == 2 ? "knnFloat16A" : "knnFloat16B";
+      Float16VectorValues values = reader.getFloat16VectorValues(field);
+      assertNotNull(values);
+      KnnVectorValues.DocIndexIterator iterator = values.iterator();
+      assertEquals(0, iterator.nextDoc());
+      assertArrayEquals(expected, values.vectorValue(0));
+      assertEquals(DocIdSetIterator.NO_MORE_DOCS, iterator.nextDoc());
+    }
+    assertNull(reader.getFloatVectorValues("knnFloat16A"));
+    assertNull(reader.getByteVectorValues("knnFloat16A"));
+  }
+
+  private static short[] float16(float... values) {
+    short[] v = new short[values.length];
+    for (int i = 0; i < values.length; i++) {
+      v[i] = Float.floatToFloat16(values[i]);
+    }
+    return v;
   }
 
   @Test
