@@ -20,12 +20,14 @@ import static com.carrotsearch.randomizedtesting.RandomizedTest.atMost;
 
 import java.io.IOException;
 import java.util.Arrays;
+import org.apache.lucene.codecs.lucene104.Lucene104ScalarQuantizedVectorsFormat;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.KnnByteVectorField;
+import org.apache.lucene.document.KnnFloat16VectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
@@ -38,13 +40,16 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.PrefixQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.VectorScorer;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.analysis.MockAnalyzer;
 import org.apache.lucene.tests.util.LuceneTestCase;
+import org.apache.lucene.tests.util.TestUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOFunction;
 import org.apache.lucene.util.SuppressForbidden;
 import org.apache.lucene.util.TestVectorUtil;
+import org.apache.lucene.util.quantization.QuantizedByteVectorValues.ScalarEncoding;
 import org.hamcrest.Matchers;
 
 /**
@@ -577,6 +582,63 @@ public class TestExitableDirectoryReader extends LuceneTestCase {
 
     reader.close();
     directory.close();
+  }
+
+  /**
+   * Rescoring through the wrapper must use full-precision vectors, not fall back to the (quantized)
+   * {@code scorer()}.
+   */
+  public void testVectorValuesRescorer() throws IOException {
+    float[][] vectors = {{4, -1, -4, 4}, {-4, 3, 1, -2}};
+    float[] query = {3, -2, -2, 4};
+    VectorSimilarityFunction similarity = VectorSimilarityFunction.EUCLIDEAN;
+    try (Directory directory = newDirectory()) {
+      IndexWriterConfig iwc =
+          newIndexWriterConfig()
+              .setCodec(
+                  TestUtil.alwaysKnnVectorsFormat(
+                      new Lucene104ScalarQuantizedVectorsFormat(
+                          ScalarEncoding.SINGLE_BIT_QUERY_NIBBLE)));
+      try (IndexWriter writer = new IndexWriter(directory, iwc)) {
+        for (float[] vector : vectors) {
+          Document doc = new Document();
+          doc.add(new KnnFloatVectorField("float", vector, similarity));
+          doc.add(new KnnFloat16VectorField("float16", toFloat16(vector), similarity));
+          writer.addDocument(doc);
+        }
+        writer.forceMerge(1);
+      }
+      try (DirectoryReader reader =
+          new ExitableDirectoryReader(DirectoryReader.open(directory), infiniteQueryTimeout())) {
+        LeafReader leaf = getOnlyLeafReader(reader);
+        assertExactScores(
+            leaf.getFloatVectorValues("float").rescorer(query), vectors, query, similarity);
+        assertExactScores(
+            leaf.getFloat16VectorValues("float16").rescorer(toFloat16(query)),
+            vectors,
+            query,
+            similarity);
+      }
+    }
+  }
+
+  private static void assertExactScores(
+      VectorScorer rescorer, float[][] vectors, float[] query, VectorSimilarityFunction similarity)
+      throws IOException {
+    DocIdSetIterator iterator = rescorer.iterator();
+    for (int doc = 0; doc < vectors.length; doc++) {
+      assertEquals(doc, iterator.nextDoc());
+      assertEquals(similarity.compare(query, vectors[doc]), rescorer.score(), 1e-6f);
+    }
+    assertEquals(DocIdSetIterator.NO_MORE_DOCS, iterator.nextDoc());
+  }
+
+  private static short[] toFloat16(float[] vector) {
+    short[] result = new short[vector.length];
+    for (int i = 0; i < vector.length; i++) {
+      result[i] = Float.floatToFloat16(vector[i]);
+    }
+    return result;
   }
 
   private static void scanAndRetrieve(LeafReader leaf, KnnVectorValues values) throws IOException {

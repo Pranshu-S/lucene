@@ -366,6 +366,10 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: ExitableDirectoryReader now forwards rescorer() on wrapped float, float16 and
+  byte vector values, so full-precision rescoring of quantized fields is no longer silently
+  replaced by quantized scores. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 

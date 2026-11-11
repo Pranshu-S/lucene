@@ -539,6 +539,11 @@ public class ExitableDirectoryReader extends FilterDirectoryReader {
       }
 
       @Override
+      public VectorScorer rescorer(float[] target) throws IOException {
+        return vectorValues.rescorer(target);
+      }
+
+      @Override
       public FloatVectorValues copy() throws IOException {
         // A caller that needs a second view, e.g. to prefetch ahead of the scoring position, still
         // has to get one that checks the timeout.
@@ -589,6 +594,11 @@ public class ExitableDirectoryReader extends FilterDirectoryReader {
       }
 
       @Override
+      public VectorScorer rescorer(short[] target) throws IOException {
+        return vectorValues.rescorer(target);
+      }
+
+      @Override
       public Float16VectorValues copy() throws IOException {
         // A caller that needs a second view, e.g. to prefetch ahead of the scoring position, still
         // has to get one that checks the timeout.
@@ -636,6 +646,11 @@ public class ExitableDirectoryReader extends FilterDirectoryReader {
       @Override
       public VectorScorer scorer(byte[] target) throws IOException {
         return vectorValues.scorer(target);
+      }
+
+      @Override
+      public VectorScorer rescorer(byte[] target) throws IOException {
+        return vectorValues.rescorer(target);
       }
 
       @Override
