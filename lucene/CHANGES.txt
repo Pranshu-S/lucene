@@ -300,6 +300,11 @@ Improvements
 Optimizations
 ---------------------
 
+* GITHUB#15904: OnHeapHnswGraph uses about 35 fewer bytes of heap per node while building and
+  merging HNSW graphs: level-0 neighbors are no longer held in a per-node array of levels, and all
+  neighbor arrays of a graph share one memory usage listener. Its ramBytesUsed() now also accounts
+  for these arrays, which it underestimated by about 12%. (Pranshu Shukla)
+
 * GITHUB#16746: Speed up decoding long overlapping LZ4 matches using bulk copies
   of initialized bytes. (Andre Kurait)
 

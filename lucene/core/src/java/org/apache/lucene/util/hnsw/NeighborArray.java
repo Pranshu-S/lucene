@@ -56,8 +56,7 @@ public class NeighborArray {
     this.scoresDescOrder = descOrder;
     this.onHeapMemoryUsageListener = onHeapMemoryUsageListener;
     if (onHeapMemoryUsageListener != null) {
-      onHeapMemoryUsageListener.accept(
-          BASE_RAM_BYTES_USED + RamUsageEstimator.sizeOf(nodes) + RamUsageEstimator.sizeOf(scores));
+      onHeapMemoryUsageListener.accept(BASE_RAM_BYTES_USED + arraysRamBytesUsed());
     }
   }
 
@@ -95,11 +94,17 @@ public class NeighborArray {
       throw new IllegalStateException("Cannot grow beyond maxSize: " + maxSize);
     }
     if (size == nodes.length) {
-      int oldLength = nodes.length;
+      long oldBytes = arraysRamBytesUsed();
       nodes = ArrayUtil.growInRange(nodes, size + 1, maxSize);
       scores = ArrayUtil.growInRange(scores, size + 1, maxSize);
-      alertOnHeapMemoryUsageChange(nodes.length, oldLength);
+      if (onHeapMemoryUsageListener != null) {
+        onHeapMemoryUsageListener.accept(arraysRamBytesUsed() - oldBytes);
+      }
     }
+  }
+
+  private long arraysRamBytesUsed() {
+    return RamUsageEstimator.sizeOf(nodes) + RamUsageEstimator.sizeOf(scores);
   }
 
   /** Add node and newScore but do not insert as sorted */
@@ -111,14 +116,6 @@ public class NeighborArray {
     nodes[size] = newNode;
     scores[size] = newScore;
     size++;
-  }
-
-  private void alertOnHeapMemoryUsageChange(int newLength, int previousLength) {
-    if (onHeapMemoryUsageListener != null) {
-      int lengthDelta = newLength - previousLength;
-      onHeapMemoryUsageListener.accept(
-          (long) (lengthDelta) * Integer.BYTES + (long) (lengthDelta) * Float.BYTES);
-    }
   }
 
   /**

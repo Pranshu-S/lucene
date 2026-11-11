@@ -17,6 +17,8 @@
 
 package org.apache.lucene.util.hnsw;
 
+import static org.apache.lucene.tests.util.RamUsageTester.ramUsed;
+
 import java.util.ArrayList;
 import java.util.List;
 import org.apache.lucene.tests.util.LuceneTestCase;
@@ -102,6 +104,62 @@ public class TestOnHeapHnswGraph extends LuceneTestCase {
     }
 
     assertGraphEquals(graph, levelToNodes);
+  }
+
+  /* nodes may be promoted to upper levels after they were added to level 0 */
+  public void testPromoteNodeToUpperLevels() {
+    OnHeapHnswGraph graph = new OnHeapHnswGraph(10, 3);
+    graph.addNode(0, 0);
+    graph.addNode(0, 1);
+    // node 2 is added from its top level down, it already counts as a node of level 0
+    graph.addNode(1, 2);
+    assertTrue(graph.nodeExistAtLevel(0, 2));
+    assertTrue(graph.nodeExistAtLevel(1, 2));
+    assertFalse(graph.nodeExistAtLevel(2, 2));
+    graph.addNode(0, 2);
+    graph.trySetNewEntryNode(2, 1);
+    assertEquals(3, graph.size());
+
+    assertFalse(graph.nodeExistAtLevel(1, 0));
+    graph.addNode(1, 0);
+    graph.addNode(2, 0);
+    graph.tryPromoteNewEntryNode(0, 2, 1);
+    assertEquals(3, graph.size());
+    assertTrue(graph.nodeExistAtLevel(2, 0));
+    assertFalse(graph.nodeExistAtLevel(1, 1));
+
+    graph.getNeighbors(0, 0).addInOrder(1, 0.5f);
+    graph.getNeighbors(1, 0).addInOrder(2, 0.5f);
+    assertEquals(1, graph.getNeighbors(0, 0).size());
+    assertEquals(1, graph.getNeighbors(1, 0).size());
+    assertEquals(0, graph.getNeighbors(2, 0).size());
+    assertNotSame(graph.getNeighbors(0, 0), graph.getNeighbors(1, 0));
+
+    assertGraphEquals(graph, List.of(List.of(0, 1, 2), List.of(0, 2), List.of(0)));
+  }
+
+  public void testRamBytesUsed() {
+    int maxConn = random().nextInt(2, 32);
+    int numNodes = atLeast(500);
+    boolean noGrowth = random().nextBoolean();
+    OnHeapHnswGraph graph = new OnHeapHnswGraph(maxConn, noGrowth ? numNodes : -1);
+    for (int node = 0; node < numNodes; node++) {
+      int nodeLevel = 0;
+      while (nodeLevel < 4 && random().nextInt(maxConn) == 0) {
+        nodeLevel++;
+      }
+      for (int level = nodeLevel; level >= 0; level--) {
+        graph.addNode(level, node);
+        NeighborArray neighbors = graph.getNeighbors(level, node);
+        int numNeighbors = random().nextInt(neighbors.maxSize());
+        for (int i = 0; i < numNeighbors; i++) {
+          neighbors.addOutOfOrder(random().nextInt(numNodes), random().nextFloat());
+        }
+      }
+    }
+    long actual = ramUsed(graph);
+    // only a few small fixed-size objects (atomics, entry node) are not accounted for
+    assertEquals(actual, graph.ramBytesUsed(), 256);
   }
 
   private static void assertGraphEquals(OnHeapHnswGraph graph, List<List<Integer>> levelToNodes) {
