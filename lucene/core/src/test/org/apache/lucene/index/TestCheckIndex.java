@@ -28,6 +28,7 @@ import org.apache.lucene.document.BinaryPoint;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.KnnFloat16VectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredField;
@@ -213,6 +214,38 @@ public class TestCheckIndex extends BaseTestCheckIndex {
       // confirm soft deletes testing status
       assertTrue(output.toString(UTF_8).contains("test: check soft deletes"));
       assertNull(segStatus.softDeletesStatus.error);
+    }
+  }
+
+  public void testCheckIndexFloat16Vectors() throws Exception {
+    try (Directory dir = newDirectory()) {
+      int numDocs = 1 + random().nextInt(20);
+      try (IndexWriter w = new IndexWriter(dir, newIndexWriterConfig())) {
+        for (int i = 0; i < numDocs; i++) {
+          Document doc = new Document();
+          float[] v = randomVector(4);
+          short[] v16 = new short[v.length];
+          for (int j = 0; j < v.length; j++) {
+            v16[j] = Float.floatToFloat16(v[j]);
+          }
+          doc.add(new KnnFloat16VectorField("v16", v16, VectorSimilarityFunction.EUCLIDEAN));
+          w.addDocument(doc);
+        }
+        w.forceMerge(1);
+      }
+
+      CheckIndex.Status status =
+          TestUtil.checkIndex(
+              dir,
+              CheckIndex.Level.MIN_LEVEL_FOR_INTEGRITY_CHECKS,
+              true,
+              true,
+              new ByteArrayOutputStream());
+      assertEquals(1, status.segmentInfos.size());
+      CheckIndex.Status.SegmentInfoStatus segStatus = status.segmentInfos.get(0);
+      assertNull(segStatus.vectorValuesStatus.error);
+      assertEquals(1, segStatus.vectorValuesStatus.totalKnnVectorFields);
+      assertEquals(numDocs, segStatus.vectorValuesStatus.totalVectorValues);
     }
   }
 

@@ -2861,7 +2861,8 @@ public final class CheckIndex implements Closeable {
                       + dimension);
             }
             if (reader.getFloatVectorValues(fieldInfo.name) == null
-                && reader.getByteVectorValues(fieldInfo.name) == null) {
+                && reader.getByteVectorValues(fieldInfo.name) == null
+                && reader.getFloat16VectorValues(fieldInfo.name) == null) {
               continue;
             }
 
