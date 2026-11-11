@@ -30,6 +30,7 @@ import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.queries.function.valuesource.ByteKnnVectorFieldSource;
 import org.apache.lucene.queries.function.valuesource.ByteVectorSimilarityFunction;
 import org.apache.lucene.queries.function.valuesource.ConstKnnByteVectorValueSource;
+import org.apache.lucene.queries.function.valuesource.ConstKnnFloat16ValueSource;
 import org.apache.lucene.queries.function.valuesource.ConstKnnFloatValueSource;
 import org.apache.lucene.queries.function.valuesource.FloatKnnVectorFieldSource;
 import org.apache.lucene.queries.function.valuesource.FloatVectorSimilarityFunction;
@@ -250,6 +251,17 @@ public class TestKnnVectorSimilarityFunctions extends LuceneTestCase {
     assertThrows(
         IllegalStateException.class,
         () -> searcher.search(new FunctionQuery(idVectorSimilarityFunction), 10));
+  }
+
+  @Test
+  public void testConstKnnFloat16ValueSourceRejectsNonFinite() {
+    for (float bad : new float[] {Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY}) {
+      short[] vector = {Float.floatToFloat16(1), Float.floatToFloat16(bad)};
+      expectThrows(IllegalArgumentException.class, () -> new ConstKnnFloat16ValueSource(vector));
+    }
+    expectThrows(
+        IllegalArgumentException.class,
+        () -> new ConstKnnFloatValueSource(new float[] {1, Float.NaN}));
   }
 
   private static void assertHits(final ValueSource func, final float[] scores) throws Exception {

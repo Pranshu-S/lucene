@@ -23,13 +23,14 @@ import java.util.Objects;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.queries.function.FunctionValues;
 import org.apache.lucene.queries.function.ValueSource;
+import org.apache.lucene.util.VectorUtil;
 
 /** Function that returns a constant float16 vector value for every document. */
 public class ConstKnnFloat16ValueSource extends ValueSource {
   private final short[] vector;
 
   public ConstKnnFloat16ValueSource(short[] constVector) {
-    this.vector = Objects.requireNonNull(constVector, "constVector");
+    this.vector = VectorUtil.checkFiniteFloat16(Objects.requireNonNull(constVector, "constVector"));
   }
 
   @Override
