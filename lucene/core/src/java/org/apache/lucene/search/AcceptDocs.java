@@ -92,8 +92,10 @@ public abstract class AcceptDocs {
 
   private static BitSet createBitSet(DocIdSetIterator iterator, Bits liveDocs, int maxDoc)
       throws IOException {
-    if (liveDocs == null && iterator instanceof BitSetIterator bitSetIterator) {
-      // If we already have a BitSet and no deletions, reuse the BitSet
+    if (liveDocs == null
+        && iterator instanceof BitSetIterator bitSetIterator
+        && bitSetIterator.getBitSet().length() == maxDoc) {
+      // If we already have a BitSet that covers all docs and no deletions, reuse the BitSet
       return bitSetIterator.getBitSet();
     } else {
       int threshold = maxDoc >> 7; // same as BitSet#of

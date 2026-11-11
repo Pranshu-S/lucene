@@ -96,6 +96,26 @@ public class TestAcceptDocs extends LuceneTestCase {
   }
 
   /**
+   * A {@link BitSetIterator} whose bit set is shorter than maxDoc is a valid iterator, but its bit
+   * set must not be exposed as-is: callers index the accept bits by any doc ID below maxDoc.
+   */
+  public void testBitSetIteratorShorterThanMaxDoc() throws IOException {
+    int maxDoc = 100;
+    int numBits = TestUtil.nextInt(random(), 1, maxDoc - 1);
+    FixedBitSet bitSet = new FixedBitSet(numBits);
+    bitSet.set(0, numBits);
+    AcceptDocs acceptDocs =
+        AcceptDocs.fromIteratorSupplier(() -> new BitSetIterator(bitSet, numBits), null, maxDoc);
+
+    Bits bits = acceptDocs.bits();
+    assertEquals(maxDoc, bits.length());
+    for (int i = 0; i < maxDoc; ++i) {
+      assertEquals(i < numBits, bits.get(i));
+    }
+    assertEquals(numBits, acceptDocs.cost());
+  }
+
+  /**
    * A {@link BitSetIterator} that counts calls to {@link #nextDoc()}. It extends {@link
    * BitSetIterator} rather than wrapping one so that the bulk {@link BitSetIterator#intoBitSet}
    * implementation remains visible to callers.

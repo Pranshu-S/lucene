@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: Fix ArrayIndexOutOfBoundsException in filtered kNN search when the filter's
+  BitSetIterator is backed by a bit set whose length differs from maxDoc. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 
