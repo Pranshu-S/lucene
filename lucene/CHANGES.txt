@@ -300,6 +300,10 @@ Improvements
 Optimizations
 ---------------------
 
+* GITHUB#15155: Bulk score byte vectors off-heap, four vectors at a time against a single load of the
+  query, in the Panama vectorized flat vector scorers, for both searching and graph building.
+  (Pranshu Shukla)
+
 * GITHUB#16746: Speed up decoding long overlapping LZ4 matches using bulk copies
   of initialized bytes. (Andre Kurait)
 

@@ -33,7 +33,10 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
 
   final int vectorByteSize;
   final MemorySegmentAccessInput input;
+  // the whole input as a single segment, or null if it is not available
+  final MemorySegment seg;
   final byte[] query;
+  final float[] scratchScores = new float[4];
   byte[] scratch;
 
   /**
@@ -41,7 +44,8 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
    * returned.
    */
   public static Optional<Lucene99MemorySegmentByteVectorScorer> create(
-      VectorSimilarityFunction type, IndexInput input, KnnVectorValues values, byte[] queryVector) {
+      VectorSimilarityFunction type, IndexInput input, KnnVectorValues values, byte[] queryVector)
+      throws IOException {
     assert values instanceof ByteVectorValues;
     input = FilterIndexInput.unwrapOnlyTest(input);
     if (!(input instanceof MemorySegmentAccessInput msInput)) {
@@ -58,9 +62,11 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
   }
 
   Lucene99MemorySegmentByteVectorScorer(
-      MemorySegmentAccessInput input, KnnVectorValues values, byte[] queryVector) {
+      MemorySegmentAccessInput input, KnnVectorValues values, byte[] queryVector)
+      throws IOException {
     super(values);
     this.input = input;
+    this.seg = input.segmentSliceOrNull(0L, input.length());
     this.vectorByteSize = values.getVectorByteLength();
     this.query = queryVector;
   }
@@ -91,8 +97,67 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
     }
   }
 
+  @Override
+  public float bulkScore(int[] nodes, float[] scores, int numNodes) throws IOException {
+    if (seg == null || Constants.NATIVE_DOT_PRODUCT_ENABLED) {
+      return super.bulkScore(nodes, scores, numNodes);
+    }
+    int i = 0;
+    final int limit = numNodes & ~3;
+    float maxScore = Float.NEGATIVE_INFINITY;
+    for (; i < limit; i += 4) {
+      long offset1 = offset(nodes[i]);
+      long offset2 = offset(nodes[i + 1]);
+      long offset3 = offset(nodes[i + 2]);
+      long offset4 = offset(nodes[i + 3]);
+      vectorOp(scratchScores, offset1, offset2, offset3, offset4);
+      scores[i + 0] = normalizeRawScore(scratchScores[0]);
+      maxScore = Math.max(maxScore, scores[i + 0]);
+      scores[i + 1] = normalizeRawScore(scratchScores[1]);
+      maxScore = Math.max(maxScore, scores[i + 1]);
+      scores[i + 2] = normalizeRawScore(scratchScores[2]);
+      maxScore = Math.max(maxScore, scores[i + 2]);
+      scores[i + 3] = normalizeRawScore(scratchScores[3]);
+      maxScore = Math.max(maxScore, scores[i + 3]);
+    }
+    // Handle remaining 1–3 nodes in bulk (if any)
+    int remaining = numNodes - i;
+    if (remaining > 0) {
+      long offset1 = offset(nodes[i]);
+      long offset2 = (remaining > 1) ? offset(nodes[i + 1]) : offset1;
+      long offset3 = (remaining > 2) ? offset(nodes[i + 2]) : offset1;
+      vectorOp(scratchScores, offset1, offset2, offset3, offset1);
+      scores[i] = normalizeRawScore(scratchScores[0]);
+      maxScore = Math.max(maxScore, scores[i]);
+      if (remaining > 1) {
+        scores[i + 1] = normalizeRawScore(scratchScores[1]);
+        maxScore = Math.max(maxScore, scores[i + 1]);
+      }
+      if (remaining > 2) {
+        scores[i + 2] = normalizeRawScore(scratchScores[2]);
+        maxScore = Math.max(maxScore, scores[i + 2]);
+      }
+    }
+    return maxScore;
+  }
+
+  private long offset(int ord) {
+    checkOrdinal(ord);
+    return (long) ord * vectorByteSize;
+  }
+
+  /**
+   * Computes the raw similarity between the query and the four vectors at the given offsets in
+   * {@link #seg}, storing the results in {@code scores[0..3]}.
+   */
+  abstract void vectorOp(float[] scores, long offset1, long offset2, long offset3, long offset4);
+
+  /** Converts a raw similarity to a score. */
+  abstract float normalizeRawScore(float rawScore);
+
   static final class CosineScorer extends Lucene99MemorySegmentByteVectorScorer {
-    CosineScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query) {
+    CosineScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query)
+        throws IOException {
       super(input, values, query);
     }
 
@@ -105,31 +170,55 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
       } else {
         raw = PanamaVectorUtilSupport.cosine(query, getSegment(node));
       }
-      return (1 + raw) / 2;
+      return normalizeRawScore(raw);
+    }
+
+    @Override
+    void vectorOp(float[] scores, long offset1, long offset2, long offset3, long offset4) {
+      MemorySegmentBulkByteVectorOps.cosineBulk(
+          scores, query, seg, offset1, offset2, offset3, offset4);
+    }
+
+    @Override
+    float normalizeRawScore(float rawScore) {
+      return (1 + rawScore) / 2;
     }
   }
 
   static final class DotProductScorer extends Lucene99MemorySegmentByteVectorScorer {
-    DotProductScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query) {
+    DotProductScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query)
+        throws IOException {
       super(input, values, query);
     }
 
     @Override
     public float score(int node) throws IOException {
       checkOrdinal(node);
-      // divide by 2 * 2^14 (maximum absolute value of product of 2 signed bytes) * len
       float raw;
       if (Constants.NATIVE_DOT_PRODUCT_ENABLED) {
         raw = NativeVectorUtilSupport.dotProduct(query, getSegment(node));
       } else {
         raw = PanamaVectorUtilSupport.dotProduct(query, getSegment(node));
       }
-      return 0.5f + raw / (float) (query.length * (1 << 15));
+      return normalizeRawScore(raw);
+    }
+
+    @Override
+    void vectorOp(float[] scores, long offset1, long offset2, long offset3, long offset4) {
+      MemorySegmentBulkByteVectorOps.dotProductBulk(
+          scores, query, seg, offset1, offset2, offset3, offset4);
+    }
+
+    @Override
+    float normalizeRawScore(float rawScore) {
+      // divide by 2 * 2^14 (maximum absolute value of product of 2 signed bytes) * len
+      return 0.5f + rawScore / (float) (query.length * (1 << 15));
     }
   }
 
   static final class EuclideanScorer extends Lucene99MemorySegmentByteVectorScorer {
-    EuclideanScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query) {
+    EuclideanScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query)
+        throws IOException {
       super(input, values, query);
     }
 
@@ -142,12 +231,24 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
       } else {
         raw = PanamaVectorUtilSupport.squareDistance(query, getSegment(node));
       }
-      return 1 / (1f + raw);
+      return normalizeRawScore(raw);
+    }
+
+    @Override
+    void vectorOp(float[] scores, long offset1, long offset2, long offset3, long offset4) {
+      MemorySegmentBulkByteVectorOps.squareDistanceBulk(
+          scores, query, seg, offset1, offset2, offset3, offset4);
+    }
+
+    @Override
+    float normalizeRawScore(float rawScore) {
+      return 1 / (1f + rawScore);
     }
   }
 
   static final class MaxInnerProductScorer extends Lucene99MemorySegmentByteVectorScorer {
-    MaxInnerProductScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query) {
+    MaxInnerProductScorer(MemorySegmentAccessInput input, KnnVectorValues values, byte[] query)
+        throws IOException {
       super(input, values, query);
     }
 
@@ -160,10 +261,21 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
       } else {
         raw = PanamaVectorUtilSupport.dotProduct(query, getSegment(node));
       }
-      if (raw < 0) {
-        return 1 / (1 + -1 * raw);
+      return normalizeRawScore(raw);
+    }
+
+    @Override
+    void vectorOp(float[] scores, long offset1, long offset2, long offset3, long offset4) {
+      MemorySegmentBulkByteVectorOps.dotProductBulk(
+          scores, query, seg, offset1, offset2, offset3, offset4);
+    }
+
+    @Override
+    float normalizeRawScore(float rawScore) {
+      if (rawScore < 0) {
+        return 1 / (1 + -1 * rawScore);
       }
-      return raw + 1;
+      return rawScore + 1;
     }
   }
 }

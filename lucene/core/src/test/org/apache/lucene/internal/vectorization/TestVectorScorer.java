@@ -45,6 +45,7 @@ import org.apache.lucene.codecs.lucene95.OffHeapByteVectorValues;
 import org.apache.lucene.codecs.lucene95.OffHeapFloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.VectorSimilarityFunction;
+import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -52,6 +53,7 @@ import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.MMapDirectory;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.NamedThreadFactory;
+import org.apache.lucene.util.hnsw.RandomVectorScorer;
 import org.apache.lucene.util.hnsw.UpdateableRandomVectorScorer;
 import org.junit.BeforeClass;
 
@@ -397,6 +399,141 @@ public class TestVectorScorer extends LuceneTestCase {
             expectThrows(
                 Throwable.class,
                 () -> MEMSEG_SCORER.getRandomVectorScorer(sim, vectorValues, new byte[] {1}));
+          }
+        }
+      }
+    }
+  }
+
+  public void testBulkScore() throws IOException {
+    try (Directory dir = new MMapDirectory(createTempDir("testBulkScore"))) {
+      testBulkScore(dir, BYTE_ARRAY_RANDOM_FUNC, true);
+    }
+  }
+
+  public void testBulkScoreMax() throws IOException {
+    try (Directory dir = new MMapDirectory(createTempDir("testBulkScoreMax"))) {
+      testBulkScore(dir, BYTE_ARRAY_MAX_FUNC, true);
+    }
+  }
+
+  public void testBulkScoreMin() throws IOException {
+    try (Directory dir = new MMapDirectory(createTempDir("testBulkScoreMin"))) {
+      testBulkScore(dir, BYTE_ARRAY_MIN_FUNC, true);
+    }
+  }
+
+  public void testBulkScoreSmallChunkSize() throws IOException {
+    // the vector data spans several chunks, so bulk scoring falls back to scoring one at a time
+    long maxChunkSize = randomLongBetween(32, 128);
+    try (Directory dir = new MMapDirectory(createTempDir("testBulkScoreSmall"), maxChunkSize)) {
+      testBulkScore(dir, BYTE_ARRAY_RANDOM_FUNC, false);
+    }
+  }
+
+  public void testBulkScoreHeap() throws IOException {
+    try (Directory dir = new ByteBuffersDirectory()) {
+      testBulkScore(dir, BYTE_ARRAY_RANDOM_FUNC, false);
+    }
+  }
+
+  // Asserts that bulk scores are exactly equal to the scores of the one at a time code path, and
+  // to the scores of the default scorer
+  void testBulkScore(
+      Directory dir, Function<Integer, byte[]> byteArraySupplier, boolean expectSingleSegment)
+      throws IOException {
+    final int dims = randomIntBetween(1, 1100);
+    final int size = randomIntBetween(64, 200);
+    final int initialOffset = randomIntBetween(0, 7); // an unaligned slice
+    final byte[][] vectors = new byte[size][];
+    final String fileName = "bulk-" + dims;
+    try (IndexOutput out = dir.createOutput(fileName, IOContext.DEFAULT)) {
+      out.writeBytes(new byte[initialOffset], 0, initialOffset);
+      for (int i = 0; i < size; i++) {
+        vectors[i] = byteArraySupplier.apply(dims);
+        out.writeBytes(vectors[i], 0, dims);
+      }
+    }
+    try (IndexInput outer = dir.openInput(fileName, IOContext.DEFAULT);
+        IndexInput in = outer.slice("slice", initialOffset, outer.length() - initialOffset)) {
+      for (var sim : List.of(COSINE, EUCLIDEAN, DOT_PRODUCT, MAXIMUM_INNER_PRODUCT)) {
+        var vectorValues = vectorValues(dims, size, in, sim);
+        for (int times = 0; times < 10; times++) {
+          // numNodes need not be a multiple of the four nodes scored at a time
+          final int numNodes = randomIntBetween(0, 2 * size);
+          final int[] nodes = new int[numNodes];
+          for (int i = 0; i < numNodes; i++) {
+            nodes[i] = randomIntBetween(0, size - 1); // duplicates are fine
+          }
+          final int target = randomIntBetween(0, size - 1);
+
+          var defaultScorer =
+              DEFAULT_SCORER.getRandomVectorScorer(sim, vectorValues, vectors[target]);
+          var scorer = MEMSEG_SCORER.getRandomVectorScorer(sim, vectorValues, vectors[target]);
+          if (expectSingleSegment) {
+            assertTrue(scorer instanceof Lucene99MemorySegmentByteVectorScorer s && s.seg != null);
+          }
+          assertBulkScoreEquals(defaultScorer, scorer, nodes);
+
+          var defaultSupplierScorer =
+              DEFAULT_SCORER.getRandomVectorScorerSupplier(sim, vectorValues).scorer();
+          defaultSupplierScorer.setScoringOrdinal(target);
+          var supplier = MEMSEG_SCORER.getRandomVectorScorerSupplier(sim, vectorValues);
+          if (expectSingleSegment) {
+            assertTrue(
+                supplier instanceof Lucene99MemorySegmentByteVectorScorerSupplier s
+                    && s.seg != null);
+          }
+          for (var ss : List.of(supplier, supplier.copy())) {
+            var supplierScorer = ss.scorer();
+            supplierScorer.setScoringOrdinal(target);
+            assertBulkScoreEquals(defaultSupplierScorer, supplierScorer, nodes);
+          }
+        }
+      }
+    }
+  }
+
+  static void assertBulkScoreEquals(
+      RandomVectorScorer defaultScorer, RandomVectorScorer scorer, int[] nodes) throws IOException {
+    final int numNodes = nodes.length;
+    float[] expected = new float[numNodes];
+    float expectedMax = Float.NEGATIVE_INFINITY;
+    for (int i = 0; i < numNodes; i++) {
+      expected[i] = scorer.score(nodes[i]);
+      expectedMax = Math.max(expectedMax, expected[i]);
+      assertEquals(defaultScorer.score(nodes[i]), expected[i], DELTA);
+    }
+    // an extra slot, to check that nothing is written beyond numNodes
+    float[] scores = new float[numNodes + 1];
+    scores[numNodes] = Float.NaN;
+    assertEquals(expectedMax, scorer.bulkScore(nodes, scores, numNodes), 0f);
+    assertArrayEquals(expected, Arrays.copyOf(scores, numNodes), 0f);
+    assertTrue(Float.isNaN(scores[numNodes]));
+  }
+
+  public void testBulkScoreIllegalOrdinal() throws IOException {
+    final int dims = 7;
+    final int size = 5;
+    try (Directory dir = new MMapDirectory(createTempDir("testBulkScoreIllegalOrdinal"))) {
+      try (IndexOutput out = dir.createOutput("illegal", IOContext.DEFAULT)) {
+        byte[] bytes = new byte[dims * size];
+        out.writeBytes(bytes, 0, bytes.length);
+      }
+      try (IndexInput in = dir.openInput("illegal", IOContext.DEFAULT)) {
+        for (var sim : List.of(COSINE, EUCLIDEAN, DOT_PRODUCT, MAXIMUM_INNER_PRODUCT)) {
+          var vectorValues = vectorValues(dims, size, in, sim);
+          var scorer = MEMSEG_SCORER.getRandomVectorScorer(sim, vectorValues, new byte[dims]);
+          var supplierScorer =
+              MEMSEG_SCORER.getRandomVectorScorerSupplier(sim, vectorValues).scorer();
+          for (int[] nodes : List.of(new int[] {0, 1, 2, size}, new int[] {0, -1})) {
+            float[] scores = new float[nodes.length];
+            expectThrows(
+                IllegalArgumentException.class,
+                () -> scorer.bulkScore(nodes, scores, nodes.length));
+            expectThrows(
+                IllegalArgumentException.class,
+                () -> supplierScorer.bulkScore(nodes, scores, nodes.length));
           }
         }
       }

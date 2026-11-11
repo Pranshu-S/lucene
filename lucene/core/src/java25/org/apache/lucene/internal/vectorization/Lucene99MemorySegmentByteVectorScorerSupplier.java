@@ -35,6 +35,8 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
   final int vectorByteSize;
   final int maxOrd;
   final MemorySegmentAccessInput input;
+  // the whole input as a single segment, or null if it is not available
+  final MemorySegment seg;
   final KnnVectorValues values; // to support ordToDoc/getAcceptOrds
   byte[] scratch1, scratch2;
 
@@ -43,7 +45,7 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
    * optional is returned.
    */
   static Optional<RandomVectorScorerSupplier> create(
-      VectorSimilarityFunction type, IndexInput input, KnnVectorValues values) {
+      VectorSimilarityFunction type, IndexInput input, KnnVectorValues values) throws IOException {
     assert values instanceof ByteVectorValues;
     input = FilterIndexInput.unwrapOnlyTest(input);
     if (!(input instanceof MemorySegmentAccessInput msInput)) {
@@ -59,8 +61,9 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
   }
 
   Lucene99MemorySegmentByteVectorScorerSupplier(
-      MemorySegmentAccessInput input, KnnVectorValues values) {
+      MemorySegmentAccessInput input, KnnVectorValues values) throws IOException {
     this.input = input;
+    this.seg = input.segmentSliceOrNull(0L, input.length());
     this.values = values;
     this.vectorByteSize = values.getVectorByteLength();
     this.maxOrd = values.size();
@@ -106,15 +109,13 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
 
   static final class CosineSupplier extends Lucene99MemorySegmentByteVectorScorerSupplier {
 
-    CosineSupplier(MemorySegmentAccessInput input, KnnVectorValues values) {
+    CosineSupplier(MemorySegmentAccessInput input, KnnVectorValues values) throws IOException {
       super(input, values);
     }
 
     @Override
     public UpdateableRandomVectorScorer scorer() {
-      return new UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer(values) {
-        private int queryOrd = 0;
-
+      return new BulkScorer(values) {
         @Override
         public float score(int node) throws IOException {
           checkOrdinal(node);
@@ -124,13 +125,24 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
           } else {
             raw = PanamaVectorUtilSupport.cosine(getFirstSegment(queryOrd), getSecondSegment(node));
           }
-          return (1 + raw) / 2;
+          return normalizeRawScore(raw);
         }
 
         @Override
-        public void setScoringOrdinal(int node) {
-          checkOrdinal(node);
-          queryOrd = node;
+        void vectorOp(
+            float[] scores,
+            long queryOffset,
+            long offset1,
+            long offset2,
+            long offset3,
+            long offset4) {
+          MemorySegmentBulkByteVectorOps.cosineBulk(
+              scores, seg, queryOffset, offset1, offset2, offset3, offset4, vectorByteSize);
+        }
+
+        @Override
+        float normalizeRawScore(float rawScore) {
+          return (1 + rawScore) / 2;
         }
       };
     }
@@ -143,19 +155,16 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
 
   static final class DotProductSupplier extends Lucene99MemorySegmentByteVectorScorerSupplier {
 
-    DotProductSupplier(MemorySegmentAccessInput input, KnnVectorValues values) {
+    DotProductSupplier(MemorySegmentAccessInput input, KnnVectorValues values) throws IOException {
       super(input, values);
     }
 
     @Override
     public UpdateableRandomVectorScorer scorer() {
-      return new UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer(values) {
-        private int queryOrd = 0;
-
+      return new BulkScorer(values) {
         @Override
         public float score(int node) throws IOException {
           checkOrdinal(node);
-          // divide by 2 * 2^14 (maximum absolute value of product of 2 signed bytes) * len
           float raw;
           if (Constants.NATIVE_DOT_PRODUCT_ENABLED) {
             raw =
@@ -166,13 +175,25 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
                 PanamaVectorUtilSupport.dotProduct(
                     getFirstSegment(queryOrd), getSecondSegment(node));
           }
-          return 0.5f + raw / (float) (values.dimension() * (1 << 15));
+          return normalizeRawScore(raw);
         }
 
         @Override
-        public void setScoringOrdinal(int node) {
-          checkOrdinal(node);
-          queryOrd = node;
+        void vectorOp(
+            float[] scores,
+            long queryOffset,
+            long offset1,
+            long offset2,
+            long offset3,
+            long offset4) {
+          MemorySegmentBulkByteVectorOps.dotProductBulk(
+              scores, seg, queryOffset, offset1, offset2, offset3, offset4, vectorByteSize);
+        }
+
+        @Override
+        float normalizeRawScore(float rawScore) {
+          // divide by 2 * 2^14 (maximum absolute value of product of 2 signed bytes) * len
+          return 0.5f + rawScore / (float) (values.dimension() * (1 << 15));
         }
       };
     }
@@ -185,15 +206,13 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
 
   static final class EuclideanSupplier extends Lucene99MemorySegmentByteVectorScorerSupplier {
 
-    EuclideanSupplier(MemorySegmentAccessInput input, KnnVectorValues values) {
+    EuclideanSupplier(MemorySegmentAccessInput input, KnnVectorValues values) throws IOException {
       super(input, values);
     }
 
     @Override
     public UpdateableRandomVectorScorer scorer() {
-      return new UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer(values) {
-        private int queryOrd = 0;
-
+      return new BulkScorer(values) {
         @Override
         public float score(int node) throws IOException {
           checkOrdinal(node);
@@ -207,13 +226,24 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
                 PanamaVectorUtilSupport.squareDistance(
                     getFirstSegment(queryOrd), getSecondSegment(node));
           }
-          return 1 / (1f + raw);
+          return normalizeRawScore(raw);
         }
 
         @Override
-        public void setScoringOrdinal(int node) {
-          checkOrdinal(node);
-          queryOrd = node;
+        void vectorOp(
+            float[] scores,
+            long queryOffset,
+            long offset1,
+            long offset2,
+            long offset3,
+            long offset4) {
+          MemorySegmentBulkByteVectorOps.squareDistanceBulk(
+              scores, seg, queryOffset, offset1, offset2, offset3, offset4, vectorByteSize);
+        }
+
+        @Override
+        float normalizeRawScore(float rawScore) {
+          return 1 / (1f + rawScore);
         }
       };
     }
@@ -226,15 +256,14 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
 
   static final class MaxInnerProductSupplier extends Lucene99MemorySegmentByteVectorScorerSupplier {
 
-    MaxInnerProductSupplier(MemorySegmentAccessInput input, KnnVectorValues values) {
+    MaxInnerProductSupplier(MemorySegmentAccessInput input, KnnVectorValues values)
+        throws IOException {
       super(input, values);
     }
 
     @Override
     public UpdateableRandomVectorScorer scorer() {
-      return new UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer(values) {
-        private int queryOrd = 0;
-
+      return new BulkScorer(values) {
         @Override
         public float score(int node) throws IOException {
           checkOrdinal(node);
@@ -248,16 +277,27 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
                 PanamaVectorUtilSupport.dotProduct(
                     getFirstSegment(queryOrd), getSecondSegment(node));
           }
-          if (raw < 0) {
-            return 1 / (1 + -1 * raw);
-          }
-          return raw + 1;
+          return normalizeRawScore(raw);
         }
 
         @Override
-        public void setScoringOrdinal(int node) {
-          checkOrdinal(node);
-          queryOrd = node;
+        void vectorOp(
+            float[] scores,
+            long queryOffset,
+            long offset1,
+            long offset2,
+            long offset3,
+            long offset4) {
+          MemorySegmentBulkByteVectorOps.dotProductBulk(
+              scores, seg, queryOffset, offset1, offset2, offset3, offset4, vectorByteSize);
+        }
+
+        @Override
+        float normalizeRawScore(float rawScore) {
+          if (rawScore < 0) {
+            return 1 / (1 + -1 * rawScore);
+          }
+          return rawScore + 1;
         }
       };
     }
@@ -265,6 +305,86 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
     @Override
     public MaxInnerProductSupplier copy() throws IOException {
       return new MaxInnerProductSupplier(input.clone(), values);
+    }
+  }
+
+  /**
+   * Base class of the scorers returned by {@link #scorer()}, which scores four vectors at a time
+   * against the scoring ordinal in {@link #bulkScore} when the vector data is a single segment.
+   */
+  abstract class BulkScorer
+      extends UpdateableRandomVectorScorer.AbstractUpdateableRandomVectorScorer {
+    int queryOrd = 0;
+    final float[] scratchScores = new float[4];
+
+    BulkScorer(KnnVectorValues values) {
+      super(values);
+    }
+
+    /**
+     * Computes the raw similarity between the vector at {@code queryOffset} and the four vectors at
+     * the given offsets in {@link #seg}, storing the results in {@code scores[0..3]}.
+     */
+    abstract void vectorOp(
+        float[] scores, long queryOffset, long offset1, long offset2, long offset3, long offset4);
+
+    /** Converts a raw similarity to a score. */
+    abstract float normalizeRawScore(float rawScore);
+
+    @Override
+    public float bulkScore(int[] nodes, float[] scores, int numNodes) throws IOException {
+      if (seg == null || Constants.NATIVE_DOT_PRODUCT_ENABLED) {
+        return super.bulkScore(nodes, scores, numNodes);
+      }
+      int i = 0;
+      final long queryOffset = (long) queryOrd * vectorByteSize;
+      final int limit = numNodes & ~3;
+      float maxScore = Float.NEGATIVE_INFINITY;
+      for (; i < limit; i += 4) {
+        long offset1 = offset(nodes[i]);
+        long offset2 = offset(nodes[i + 1]);
+        long offset3 = offset(nodes[i + 2]);
+        long offset4 = offset(nodes[i + 3]);
+        vectorOp(scratchScores, queryOffset, offset1, offset2, offset3, offset4);
+        scores[i + 0] = normalizeRawScore(scratchScores[0]);
+        maxScore = Math.max(maxScore, scores[i + 0]);
+        scores[i + 1] = normalizeRawScore(scratchScores[1]);
+        maxScore = Math.max(maxScore, scores[i + 1]);
+        scores[i + 2] = normalizeRawScore(scratchScores[2]);
+        maxScore = Math.max(maxScore, scores[i + 2]);
+        scores[i + 3] = normalizeRawScore(scratchScores[3]);
+        maxScore = Math.max(maxScore, scores[i + 3]);
+      }
+      // Handle remaining 1–3 nodes in bulk (if any)
+      int remaining = numNodes - i;
+      if (remaining > 0) {
+        long offset1 = offset(nodes[i]);
+        long offset2 = (remaining > 1) ? offset(nodes[i + 1]) : offset1;
+        long offset3 = (remaining > 2) ? offset(nodes[i + 2]) : offset1;
+        vectorOp(scratchScores, queryOffset, offset1, offset2, offset3, offset1);
+        scores[i] = normalizeRawScore(scratchScores[0]);
+        maxScore = Math.max(maxScore, scores[i]);
+        if (remaining > 1) {
+          scores[i + 1] = normalizeRawScore(scratchScores[1]);
+          maxScore = Math.max(maxScore, scores[i + 1]);
+        }
+        if (remaining > 2) {
+          scores[i + 2] = normalizeRawScore(scratchScores[2]);
+          maxScore = Math.max(maxScore, scores[i + 2]);
+        }
+      }
+      return maxScore;
+    }
+
+    private long offset(int ord) {
+      checkOrdinal(ord);
+      return (long) ord * vectorByteSize;
+    }
+
+    @Override
+    public void setScoringOrdinal(int node) {
+      checkOrdinal(node);
+      queryOrd = node;
     }
   }
 }
