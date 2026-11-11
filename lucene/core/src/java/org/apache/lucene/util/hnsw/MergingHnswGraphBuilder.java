@@ -44,9 +44,11 @@ import org.apache.lucene.util.IORunnable;
  *             as usual: by searching gL to find the best candidates `w` to which connect the nodes.
  *         <li>For each remaining node in gS:
  *             <ul>
- *               <li>We provide eps to search in gL. We form `eps` by the union of the node's
- *                   neighbors in gS and the node's neighbors' neighbors in gL. We also limit
- *                   beamWidth (efConstruction to M*3)
+ *               <li>We provide eps to search level 0 of gL: the node's neighbors in gS that are
+ *                   already in gL, which include its neighbors from the join set. The search
+ *                   expands the best of them first, so their own neighbors in gL need not all be
+ *                   scored up front. We also limit beamWidth (efConstruction to M*3), and skip the
+ *                   search of the upper levels when the node is only added to level 0.
  *             </ul>
  *       </ul>
  * </ul>
@@ -203,27 +205,18 @@ public final class MergingHnswGraphBuilder extends HnswGraphBuilder {
     }
 
     // for each node outside of j set:
-    // form the entry points set for the node
-    // by joining the node's neighbours in gS with
-    // the node's neighbours' neighbours in gL
+    // search level 0 of gL from the node's neighbours in gS that are already in gL
+    IntHashSet eps = new IntHashSet();
     for (int u = 0; u < size; u++) {
       if (j.contains(u)) {
         continue;
       }
-      IntHashSet eps = new IntHashSet();
+      eps.clear();
       gS.seek(0, u);
       for (int v = gS.nextNeighbor(); v != NO_MORE_DOCS; v = gS.nextNeighbor()) {
-        // if u's neighbour v is in the join set, or already added to gL (v < u),
-        // then we add v's neighbours from gL to the candidate list
+        // u's neighbour v is already in gL if it is in the join set, or if it was added before u
         if (v < u || j.contains(v)) {
-          int newv = ordMapS[v];
-          eps.add(newv);
-
-          hnsw.seek(0, newv);
-          int friendOrd;
-          while ((friendOrd = hnsw.nextNeighbor()) != NO_MORE_DOCS) {
-            eps.add(friendOrd);
-          }
+          eps.add(ordMapS[v]);
         }
       }
       addGraphNode(ordMapS[u], eps);

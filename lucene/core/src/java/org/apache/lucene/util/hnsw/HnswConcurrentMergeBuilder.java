@@ -575,8 +575,7 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
     /**
      * Adds a node of a graph being joined that is not in its join set. Like {@link
      * MergingHnswGraphBuilder}, the search on level 0 enters from the node's neighbors in that
-     * graph that are already inserted, which includes its join set neighbors, and from their
-     * neighbors in the merged graph.
+     * graph that are already inserted, which includes its join set neighbors.
      *
      * @param ordMap maps ordinals of the graph being joined to ordinals of the merged graph
      * @param u the node, as an ordinal of the graph being joined
@@ -586,18 +585,8 @@ public class HnswConcurrentMergeBuilder implements HnswBuilder {
       joinedGraph.seek(0, u);
       for (int v = joinedGraph.nextNeighbor(); v != NO_MORE_DOCS; v = joinedGraph.nextNeighbor()) {
         int neighbor = ordMap[v];
-        if (inserted.contains(neighbor) == false) {
-          continue;
-        }
-        eps.add(neighbor);
-        Lock lock = hnswLock.read(0, neighbor);
-        try {
-          NeighborArray neighbors = hnsw.getNeighbors(0, neighbor);
-          for (int n = 0; n < neighbors.size(); n++) {
-            eps.add(neighbors.nodes()[n]);
-          }
-        } finally {
-          lock.unlock();
+        if (inserted.contains(neighbor)) {
+          eps.add(neighbor);
         }
       }
       int node = ordMap[u];

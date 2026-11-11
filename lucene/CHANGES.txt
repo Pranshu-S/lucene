@@ -311,6 +311,12 @@ Optimizations
   their vectors with a full search. Graphs now match the serial merge: slightly lower recall at the
   same ef, but fewer visited nodes. (Lantao Jin)
 
+* GITHUB#15504: HNSW merges that join a graph into the base graph now search level 0 only from each
+  joined node's neighbors in its own graph, instead of first scoring all of their neighbors in the
+  merged graph, and skip the search of the upper levels for nodes that are only added to level 0.
+  This saves about 8% of the vector comparisons of such merges at about the same recall.
+  (Pranshu Shukla)
+
 * GITHUB#16771: Lucene99FlatVectorsWriter now aligns vector data to 4096 bytes for all encodings
   (previously 64 for float32 and 4 for float16 and byte), so a vector whose size divides a page or is
   a multiple of it no longer straddles a page boundary and a rescoring read touches no extra page.

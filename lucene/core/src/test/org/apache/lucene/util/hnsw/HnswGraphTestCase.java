@@ -40,6 +40,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
 import org.apache.lucene.codecs.hnsw.DefaultFlatVectorScorer;
 import org.apache.lucene.codecs.lucene99.Lucene99HnswVectorsFormat;
@@ -1325,24 +1326,144 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
     }
   }
 
-  private void assertRecallComparable(MergeResult<T> serial, MergeResult<T> concurrent)
+  /**
+   * A node that is only added to level 0 and that comes with entry points for level 0 must not
+   * search the upper levels: their results would only be used as entry points for level 0.
+   */
+  public void testLevel0EntryPointsSkipUpperLevels() throws IOException {
+    int size = 6;
+    int newNode = size - 1;
+    KnnVectorValues vectors = vectorValues(size, atLeast(4));
+    RandomVectorScorerSupplier scorerSupplier = buildScorerSupplier(vectors);
+    while (true) {
+      // nodes 0 and 1 are on levels 1 and 0, and only connected with each other on level 0, so the
+      // search of level 0 from node 2 cannot reach them
+      FixedBitSet scored = new FixedBitSet(size);
+      HnswGraphBuilder builder =
+          new HnswGraphBuilder(
+              new ObservingScorerSupplier(scorerSupplier, scored::set),
+              10,
+              random().nextLong(),
+              twoComponentGraph(scorerSupplier, size));
+      builder.addGraphNode(newNode, IntHashSet.from(2));
+      if (builder.hnsw.nodeExistAtLevel(1, newNode)) {
+        // the node needs the upper levels' search for its own upper levels, try another seed
+        continue;
+      }
+      assertFalse(scored.get(0));
+      assertFalse(scored.get(1));
+      NeighborArray neighbors = builder.hnsw.getNeighbors(0, newNode);
+      assertTrue(neighbors.size() > 0);
+      for (int i = 0; i < neighbors.size(); i++) {
+        assertTrue(neighbors.nodes()[i] >= 2);
+      }
+      break;
+    }
+
+    // without entry points, the search starts from the entry node on the top level
+    FixedBitSet scored = new FixedBitSet(size);
+    HnswGraphBuilder builder =
+        new HnswGraphBuilder(
+            new ObservingScorerSupplier(scorerSupplier, scored::set),
+            10,
+            random().nextLong(),
+            twoComponentGraph(scorerSupplier, size));
+    builder.addGraphNode(newNode);
+    assertTrue(scored.get(0));
+  }
+
+  /**
+   * A graph of {@code size} nodes but the last one, where nodes 0 and 1 are on levels 1 and 0, the
+   * entry node is 0, and level 0 has two components: {0, 1} and the other nodes.
+   */
+  private static OnHeapHnswGraph twoComponentGraph(
+      RandomVectorScorerSupplier scorerSupplier, int size) throws IOException {
+    OnHeapHnswGraph graph = new OnHeapHnswGraph(10, size);
+    for (int node = 0; node < size - 1; node++) {
+      for (int level = node < 2 ? 1 : 0; level >= 0; level--) {
+        graph.addNode(level, node);
+      }
+    }
+    assertTrue(graph.trySetNewEntryNode(0, 1));
+    UpdateableRandomVectorScorer scorer = scorerSupplier.scorer();
+    for (int level = 0; level <= 1; level++) {
+      link(graph, scorer, level, 0, 1);
+    }
+    for (int a = 2; a < size - 1; a++) {
+      for (int b = a + 1; b < size - 1; b++) {
+        link(graph, scorer, 0, a, b);
+      }
+    }
+    return graph;
+  }
+
+  private static void link(
+      OnHeapHnswGraph graph, UpdateableRandomVectorScorer scorer, int level, int a, int b)
+      throws IOException {
+    scorer.setScoringOrdinal(a);
+    float score = scorer.score(b);
+    graph.getNeighbors(level, a).addOutOfOrder(b, score);
+    graph.getNeighbors(level, b).addOutOfOrder(a, score);
+  }
+
+  /**
+   * Joining graphs searches level 0 only from the joined nodes' neighbors in their own graph. This
+   * must stay cheaper than building the graph from scratch, without building a worse graph.
+   */
+  public void testMergeRecallComparableToRebuild() throws IOException {
+    int[] segmentSizes = {
+      TestUtil.nextInt(random(), 1000, 1500),
+      TestUtil.nextInt(random(), 500, 1000),
+      TestUtil.nextInt(random(), 200, 500),
+      TestUtil.nextInt(random(), 50, 200)
+    };
+    List<T> vectors = randomVectors(Arrays.stream(segmentSizes).sum());
+    try (Directory dir = newDirectory()) {
+      buildMergeIndex(dir, vectors, segmentSizes, Set.of());
+      try (DirectoryReader reader = DirectoryReader.open(dir)) {
+        MergeResult<T> merged = merge(reader, vectors, TestUtil.nextInt(random(), 0, 4));
+        LongAdder rebuildScoreCount = new LongAdder();
+        OnHeapHnswGraph rebuilt =
+            HnswGraphBuilder.create(
+                    new ObservingScorerSupplier(
+                        buildScorerSupplier(vectorValues(merged.vectors)),
+                        _ -> rebuildScoreCount.increment()),
+                    MERGE_M,
+                    MERGE_BEAM_WIDTH,
+                    random().nextLong())
+                .build(merged.vectors.size());
+        MergeResult<T> rebuild =
+            new MergeResult<>(rebuilt, merged.vectors, rebuildScoreCount.sum());
+        assertNoIsolatedNodes(merged.graph);
+        assertRecallComparable(rebuild, merged);
+        assertTrue(
+            "merge scored " + merged.scoreCount + " vectors, rebuild scored " + rebuild.scoreCount,
+            merged.scoreCount < rebuild.scoreCount);
+      }
+    }
+  }
+
+  /**
+   * Asserts that the recall of {@code actual} is not much worse than the one of {@code expected}.
+   */
+  private void assertRecallComparable(MergeResult<T> expected, MergeResult<T> actual)
       throws IOException {
     List<T> queries = randomVectors(100);
-    double serialRecall = recall(serial.graph, serial.vectors, queries);
-    double concurrentRecall = recall(concurrent.graph, concurrent.vectors, queries);
+    double expectedRecall = recall(expected.graph, expected.vectors, queries);
+    double actualRecall = recall(actual.graph, actual.vectors, queries);
     String message =
         String.format(
             Locale.ROOT,
-            "%s %s: serial recall %.3f, concurrent recall %.3f",
+            "%s %s: expected recall %.3f, actual recall %.3f",
             getVectorEncoding(),
             similarityFunction,
-            serialRecall,
-            concurrentRecall);
+            expectedRecall,
+            actualRecall);
     if (VERBOSE) {
       System.out.println(message);
     }
-    assertTrue(message, concurrentRecall > 0.8);
-    assertTrue(message, concurrentRecall > serialRecall - 0.05);
+    assertTrue(message, actualRecall > 0.8);
+    assertTrue(message, actualRecall > expectedRecall - 0.05);
   }
 
   /** The merged graph, the vectors it was built from, and how many vectors the merge scored. */
@@ -1372,7 +1493,8 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
     KnnVectorValues mergedVectors = vectorValues(liveVectors);
     LongAdder scoreCount = new LongAdder();
     RandomVectorScorerSupplier scorerSupplier =
-        new CountingScorerSupplier(buildScorerSupplier(mergedVectors), scoreCount);
+        new ObservingScorerSupplier(
+            buildScorerSupplier(mergedVectors), _ -> scoreCount.increment());
     FieldInfo fieldInfo = reader.leaves().get(0).reader().getFieldInfos().fieldInfo(MERGE_FIELD);
     ExecutorService exec = null;
     try {
@@ -1516,8 +1638,8 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
     };
   }
 
-  /** Counts how many vectors the scorers it creates have scored, across all copies. */
-  private record CountingScorerSupplier(RandomVectorScorerSupplier in, LongAdder count)
+  /** Reports every vector the scorers it creates score, across all copies. */
+  private record ObservingScorerSupplier(RandomVectorScorerSupplier in, IntConsumer onScore)
       implements RandomVectorScorerSupplier {
 
     @Override
@@ -1531,13 +1653,15 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
 
         @Override
         public float score(int node) throws IOException {
-          count.increment();
+          onScore.accept(node);
           return scorer.score(node);
         }
 
         @Override
         public float bulkScore(int[] nodes, float[] scores, int numNodes) throws IOException {
-          count.add(numNodes);
+          for (int i = 0; i < numNodes; i++) {
+            onScore.accept(nodes[i]);
+          }
           return scorer.bulkScore(nodes, scores, numNodes);
         }
 
@@ -1560,7 +1684,7 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
 
     @Override
     public RandomVectorScorerSupplier copy() throws IOException {
-      return new CountingScorerSupplier(in.copy(), count);
+      return new ObservingScorerSupplier(in.copy(), onScore);
     }
   }
 

@@ -297,7 +297,8 @@ public class HnswGraphBuilder implements HnswBuilder {
    * (repeating step 2,3 for new levels) and again try to promote the node to entry node.
    *
    * @param eps0 If specified, we will use it as the entry points of search on level 0, is useful
-   *     when you have some prior knowledge, e.g. in {@link MergingHnswGraphBuilder}
+   *     when you have some prior knowledge, e.g. in {@link MergingHnswGraphBuilder}. A node that is
+   *     only added to level 0 then does not search the upper levels at all.
    */
   private void addGraphNodeInternal(int node, UpdateableRandomVectorScorer scorer, IntHashSet eps0)
       throws IOException {
@@ -320,6 +321,7 @@ public class HnswGraphBuilder implements HnswBuilder {
     // if the entry node is already set, then we have to do all connections first before we can
     // promote ourselves as entry node
 
+    boolean hasEps0 = eps0 != null && eps0.size() > 0;
     int lowestUnsetLevel = 0;
     int curMaxLevel;
     do {
@@ -334,8 +336,11 @@ public class HnswGraphBuilder implements HnswBuilder {
 
       // we first do the search from top to bottom
       // for levels > nodeLevel search with topk = 1
+      // The descent only finds the entry points of the levels the node is added to, so a node that
+      // is only added to level 0 and that comes with its own entry points for level 0 skips it
+      int descentLevel = hasEps0 && nodeLevel == 0 ? curMaxLevel : nodeLevel;
       GraphBuilderKnnCollector candidates = entryCandidates;
-      for (int level = curMaxLevel; level > nodeLevel; level--) {
+      for (int level = curMaxLevel; level > descentLevel; level--) {
         candidates.clear();
         graphSearcher.searchLevel(candidates, scorer, level, eps, hnsw, null);
         eps[0] = candidates.popNode();
@@ -348,7 +353,7 @@ public class HnswGraphBuilder implements HnswBuilder {
       for (int i = scratchPerLevel.length - 1; i >= 0; i--) {
         int level = i + lowestUnsetLevel;
         candidates.clear();
-        if (level == 0 && eps0 != null && eps0.size() > 0) {
+        if (level == 0 && hasEps0) {
           eps = eps0.toArray();
           candidates = beamCandidates0;
         }
