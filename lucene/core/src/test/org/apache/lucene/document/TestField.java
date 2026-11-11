@@ -30,6 +30,7 @@ import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.KnnFloat16VectorQuery;
@@ -764,6 +765,30 @@ public class TestField extends LuceneTestCase {
             IllegalArgumentException.class,
             () -> new KnnByteVectorField("knnBytes", bv, byteFieldType));
     assertTrue(zeroError.getMessage().contains("zero vector not allowed"));
+  }
+
+  public void testKnnFieldEmptyVectorWithFieldType() {
+    // a default FieldType has FLOAT32 encoding and vector dimension 0
+    FieldType floatFieldType = new FieldType();
+    IllegalArgumentException e =
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> new KnnFloatVectorField("knnFloats", new float[0], floatFieldType));
+    assertTrue(e.getMessage().contains("empty vector"));
+
+    FieldType byteFieldType =
+        new FieldType() {
+          @Override
+          public VectorEncoding vectorEncoding() {
+            return VectorEncoding.BYTE;
+          }
+        };
+    assertEquals(0, byteFieldType.vectorDimension());
+    e =
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> new KnnByteVectorField("knnBytes", new byte[0], byteFieldType));
+    assertTrue(e.getMessage().contains("empty vector"));
   }
 
   public void testKnnFieldSetVectorValueZeroVectors() throws Exception {

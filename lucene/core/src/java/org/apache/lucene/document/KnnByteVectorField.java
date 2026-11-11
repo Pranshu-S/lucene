@@ -139,6 +139,9 @@ public class KnnByteVectorField extends Field {
               + fieldType.vectorEncoding());
     }
     Objects.requireNonNull(vector, "vector value must not be null");
+    if (vector.length == 0) {
+      throw new IllegalArgumentException("cannot index an empty vector");
+    }
     if (vector.length != fieldType.vectorDimension()) {
       throw new IllegalArgumentException(
           "The number of vector dimensions does not match the field type");

@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: KnnFloatVectorField and KnnByteVectorField now reject an empty vector when created
+  with a FieldType whose vector dimension is 0, as documented. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 
