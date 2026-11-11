@@ -57,6 +57,15 @@ public class TestIncrementalHnswGraphMergerBaseSelection extends LuceneTestCase 
   // B has no deletions and falls strictly between A's live count and A's total node count
   private static final int B_DOCS = A_DOCS - A_DELETES / 2;
 
+  public void testDeletedPercentage() {
+    assertEquals(0, IncrementalHnswGraphMerger.deletedPercentage(1000, 1000));
+    assertEquals(40, IncrementalHnswGraphMerger.deletedPercentage(1000, 600));
+    assertEquals(100, IncrementalHnswGraphMerger.deletedPercentage(1000, 0));
+    // (graphSize - liveVectorCount) * 100 must not overflow an int
+    assertEquals(99, IncrementalHnswGraphMerger.deletedPercentage(30_000_000, 100_000));
+    assertEquals(100, IncrementalHnswGraphMerger.deletedPercentage(Integer.MAX_VALUE, 0));
+  }
+
   /**
    * Segment A carries deletions under the threshold; segment B has none. B holds more live vectors
    * than A but fewer nodes, so it must be chosen as the base regardless of the order in which the

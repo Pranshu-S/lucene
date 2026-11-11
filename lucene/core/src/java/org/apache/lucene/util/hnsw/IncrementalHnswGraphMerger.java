@@ -130,9 +130,7 @@ public class IncrementalHnswGraphMerger implements HnswGraphMerger {
 
     GraphReader graphReader = new GraphReader(reader, docMap, graphSize, candidateVectorCount);
 
-    int deletePct = ((graphSize - candidateVectorCount) * 100) / graphSize;
-
-    if (deletePct <= DELETE_PCT_THRESHOLD
+    if (deletedPercentage(graphSize, candidateVectorCount) <= DELETE_PCT_THRESHOLD
         && (largestGraphReader == null
             || candidateVectorCount > largestGraphReader.liveVectorCount)) {
       largestGraphReader = graphReader;
@@ -144,6 +142,17 @@ public class IncrementalHnswGraphMerger implements HnswGraphMerger {
     }
 
     return this;
+  }
+
+  /**
+   * Returns the percentage of a graph's nodes whose documents are deleted, rounded down.
+   *
+   * @param graphSize total number of nodes in the graph, including deleted ones; must be positive
+   * @param liveVectorCount number of nodes in the graph whose documents are live
+   */
+  static int deletedPercentage(int graphSize, int liveVectorCount) {
+    // computed in long: (graphSize - liveVectorCount) * 100 overflows an int above ~21.5M deletes
+    return (int) (((long) (graphSize - liveVectorCount) * 100) / graphSize);
   }
 
   /**

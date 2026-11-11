@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: Fix int overflow in the deleted-percentage check of IncrementalHnswGraphMerger, which
+  could select a graph with more than 21.5M deleted nodes as the merge base. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 
