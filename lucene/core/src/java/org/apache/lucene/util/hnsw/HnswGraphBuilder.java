@@ -323,6 +323,11 @@ public class HnswGraphBuilder implements HnswBuilder {
     int lowestUnsetLevel = 0;
     int curMaxLevel;
     do {
+      if (lowestUnsetLevel > 0) {
+        // retrying after a lost entry node promotion: linking the node to its neighbors pointed
+        // the scorer at other nodes, so point it back at the node being inserted
+        scorer.setScoringOrdinal(node);
+      }
       curMaxLevel = hnsw.numLevels() - 1;
       // NOTE: the entry node and max level are not retrieved synchronously, which could lead to a
       // situation where

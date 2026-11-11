@@ -366,6 +366,9 @@ Optimizations
 
 Bug Fixes
 ---------------------
+* GITHUB#16937: Fix concurrent HNSW graph building scoring against the wrong vector when a worker
+  retries the insertion of a node after losing the entry node promotion. (Pranshu Shukla)
+
 * GITHUB#16983: UnifiedHighlighter.Builder#withFlags is no longer ignored when building the
   highlighter. (Christoph Büscher)
 
