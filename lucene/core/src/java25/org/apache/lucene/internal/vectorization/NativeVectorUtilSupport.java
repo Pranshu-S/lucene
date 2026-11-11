@@ -498,6 +498,40 @@ final class NativeVectorUtilSupport implements VectorUtilSupport {
   }
 
   @Override
+  public float float32DotProduct(MemorySegment a, MemorySegment b) {
+    return delegateVectorUtilSupport.float32DotProduct(a, b);
+  }
+
+  @Override
+  public float float32Cosine(MemorySegment a, MemorySegment b) {
+    return delegateVectorUtilSupport.float32Cosine(a, b);
+  }
+
+  @Override
+  public float float32SquareDistance(MemorySegment a, MemorySegment b) {
+    return delegateVectorUtilSupport.float32SquareDistance(a, b);
+  }
+
+  @Override
+  public int int8DotProduct(MemorySegment a, MemorySegment b) {
+    return (dotProduct$MH != null)
+        ? dotProduct(a, b)
+        : delegateVectorUtilSupport.int8DotProduct(a, b);
+  }
+
+  @Override
+  public float int8Cosine(MemorySegment a, MemorySegment b) {
+    return (cosine$MH != null) ? cosine(a, b) : delegateVectorUtilSupport.int8Cosine(a, b);
+  }
+
+  @Override
+  public int int8SquareDistance(MemorySegment a, MemorySegment b) {
+    return (squareDistance$MH != null)
+        ? squareDistance(a, b)
+        : delegateVectorUtilSupport.int8SquareDistance(a, b);
+  }
+
+  @Override
   public long int4BitDotProduct(byte[] int4Quantized, byte[] binaryQuantized) {
     if (int4BitDotProduct$MH != null) {
       return invokeLongMethodHandle(

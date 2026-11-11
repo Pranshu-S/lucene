@@ -17,6 +17,8 @@
 
 package org.apache.lucene.internal.vectorization;
 
+import java.lang.foreign.MemorySegment;
+
 /**
  * Interface for implementations of VectorUtil support.
  *
@@ -90,6 +92,31 @@ public interface VectorUtilSupport {
 
   /** Returns the sum of squared differences of the two unsigned byte vectors. */
   int uint8SquareDistance(byte[] a, byte[] b);
+
+  // MemorySegment variants: both segments have the same byte size, which is a multiple of the
+  // element size; float values are read in little-endian byte order, without alignment constraints
+
+  /** Returns the dot product of the two float32 vectors stored in the given segments. */
+  float float32DotProduct(MemorySegment a, MemorySegment b);
+
+  /** Returns the cosine similarity between the two float32 vectors stored in the given segments. */
+  float float32Cosine(MemorySegment a, MemorySegment b);
+
+  /**
+   * Returns the sum of squared differences of the two float32 vectors stored in the given segments.
+   */
+  float float32SquareDistance(MemorySegment a, MemorySegment b);
+
+  /** Returns the dot product of the two signed byte vectors stored in the given segments. */
+  int int8DotProduct(MemorySegment a, MemorySegment b);
+
+  /** Returns the cosine similarity between the two signed byte vectors stored in the segments. */
+  float int8Cosine(MemorySegment a, MemorySegment b);
+
+  /**
+   * Returns the sum of squared differences of the two signed byte vectors stored in the segments.
+   */
+  int int8SquareDistance(MemorySegment a, MemorySegment b);
 
   /**
    * Given an array {@code buffer} that is sorted between indexes {@code 0} inclusive and {@code to}

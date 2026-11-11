@@ -18,6 +18,10 @@ package org.apache.lucene.util;
 
 import static com.carrotsearch.randomizedtesting.generators.RandomNumbers.randomIntBetween;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Random;
 import org.apache.lucene.index.VectorSimilarityFunction;
@@ -108,6 +112,53 @@ public class TestVectorUtil extends LuceneTestCase {
   public void testCosineThrowsForDimensionMismatch() {
     float[] v = {1, 0, 0}, u = {0, 1};
     expectThrows(IllegalArgumentException.class, () -> VectorUtil.cosine(u, v));
+  }
+
+  public void testFloat32MemorySegment() {
+    float[] u = randomVector(), v = randomVector(u.length);
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment su = toLittleEndianSegment(u, arena);
+      MemorySegment sv = toLittleEndianSegment(v, arena);
+      assertEquals(VectorUtil.dotProduct(u, v), VectorUtil.float32DotProduct(su, sv), DELTA);
+      assertEquals(VectorUtil.cosine(u, v), VectorUtil.float32Cosine(su, sv), DELTA);
+      assertEquals(
+          VectorUtil.squareDistance(u, v), VectorUtil.float32SquareDistance(su, sv), DELTA);
+    }
+  }
+
+  public void testFloat32MemorySegmentThrowsForInvalidSizes() {
+    MemorySegment a = MemorySegment.ofArray(new byte[3 * Float.BYTES]);
+    MemorySegment b = MemorySegment.ofArray(new byte[2 * Float.BYTES]);
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.float32DotProduct(a, b));
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.float32Cosine(a, b));
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.float32SquareDistance(a, b));
+    // same size, but not a whole number of floats
+    MemorySegment c = MemorySegment.ofArray(new byte[7]);
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.float32DotProduct(c, c));
+  }
+
+  public void testInt8MemorySegment() {
+    byte[] u = randomVectorBytes(), v = randomVectorBytes(u.length);
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment su = arena.allocate(u.length).copyFrom(MemorySegment.ofArray(u));
+      MemorySegment sv = MemorySegment.ofArray(v);
+      assertEquals(VectorUtil.dotProduct(u, v), VectorUtil.int8DotProduct(su, sv));
+      assertEquals(VectorUtil.cosine(u, v), VectorUtil.int8Cosine(su, sv), DELTA);
+      assertEquals(VectorUtil.squareDistance(u, v), VectorUtil.int8SquareDistance(su, sv));
+    }
+    MemorySegment a = MemorySegment.ofArray(new byte[3]);
+    MemorySegment b = MemorySegment.ofArray(new byte[2]);
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.int8DotProduct(a, b));
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.int8Cosine(a, b));
+    expectThrows(IllegalArgumentException.class, () -> VectorUtil.int8SquareDistance(a, b));
+  }
+
+  private static MemorySegment toLittleEndianSegment(float[] v, Arena arena) {
+    MemorySegment seg = arena.allocate((long) v.length * Float.BYTES);
+    for (int i = 0; i < v.length; i++) {
+      seg.setAtIndex(ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN), i, v[i]);
+    }
+    return seg;
   }
 
   public void testNormalize() {

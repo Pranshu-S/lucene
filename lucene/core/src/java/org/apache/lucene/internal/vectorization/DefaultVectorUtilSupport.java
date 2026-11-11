@@ -17,13 +17,20 @@
 
 package org.apache.lucene.internal.vectorization;
 
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
 import static org.apache.lucene.util.VectorUtil.isUnitVector;
 
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.Constants;
 import org.apache.lucene.util.SuppressForbidden;
 
 final class DefaultVectorUtilSupport implements VectorUtilSupport {
+
+  private static final ValueLayout.OfFloat LE_FLOAT =
+      ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
   DefaultVectorUtilSupport() {}
 
@@ -308,6 +315,159 @@ final class DefaultVectorUtilSupport implements VectorUtilSupport {
     int squareSum = 0;
     for (int i = 0; i < a.length; i++) {
       int diff = Byte.toUnsignedInt(a[i]) - Byte.toUnsignedInt(b[i]);
+      squareSum += diff * diff;
+    }
+    return squareSum;
+  }
+
+  // The MemorySegment variants below mirror the array variants above (same accumulation order),
+  // so that both return identical results for the same vectors.
+
+  @Override
+  public float float32DotProduct(MemorySegment a, MemorySegment b) {
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    float res = 0f;
+    int i = 0;
+
+    // if the array is big, unroll it
+    if (length > 32) {
+      float acc1 = 0;
+      float acc2 = 0;
+      float acc3 = 0;
+      float acc4 = 0;
+      int upperBound = length & ~(4 - 1);
+      for (; i < upperBound; i += 4) {
+        acc1 = fma(a.getAtIndex(LE_FLOAT, i), b.getAtIndex(LE_FLOAT, i), acc1);
+        acc2 = fma(a.getAtIndex(LE_FLOAT, i + 1), b.getAtIndex(LE_FLOAT, i + 1), acc2);
+        acc3 = fma(a.getAtIndex(LE_FLOAT, i + 2), b.getAtIndex(LE_FLOAT, i + 2), acc3);
+        acc4 = fma(a.getAtIndex(LE_FLOAT, i + 3), b.getAtIndex(LE_FLOAT, i + 3), acc4);
+      }
+      res += acc1 + acc2 + acc3 + acc4;
+    }
+
+    for (; i < length; i++) {
+      res = fma(a.getAtIndex(LE_FLOAT, i), b.getAtIndex(LE_FLOAT, i), res);
+    }
+    return res;
+  }
+
+  @Override
+  public float float32Cosine(MemorySegment a, MemorySegment b) {
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    float sum = 0.0f;
+    float norm1 = 0.0f;
+    float norm2 = 0.0f;
+    int i = 0;
+
+    // if the array is big, unroll it
+    if (length > 32) {
+      float sum1 = 0;
+      float sum2 = 0;
+      float norm1_1 = 0;
+      float norm1_2 = 0;
+      float norm2_1 = 0;
+      float norm2_2 = 0;
+
+      int upperBound = length & ~(2 - 1);
+      for (; i < upperBound; i += 2) {
+        // one
+        float a1 = a.getAtIndex(LE_FLOAT, i);
+        float b1 = b.getAtIndex(LE_FLOAT, i);
+        sum1 = fma(a1, b1, sum1);
+        norm1_1 = fma(a1, a1, norm1_1);
+        norm2_1 = fma(b1, b1, norm2_1);
+
+        // two
+        float a2 = a.getAtIndex(LE_FLOAT, i + 1);
+        float b2 = b.getAtIndex(LE_FLOAT, i + 1);
+        sum2 = fma(a2, b2, sum2);
+        norm1_2 = fma(a2, a2, norm1_2);
+        norm2_2 = fma(b2, b2, norm2_2);
+      }
+      sum += sum1 + sum2;
+      norm1 += norm1_1 + norm1_2;
+      norm2 += norm2_1 + norm2_2;
+    }
+
+    for (; i < length; i++) {
+      float ai = a.getAtIndex(LE_FLOAT, i);
+      float bi = b.getAtIndex(LE_FLOAT, i);
+      sum = fma(ai, bi, sum);
+      norm1 = fma(ai, ai, norm1);
+      norm2 = fma(bi, bi, norm2);
+    }
+    return (float) (sum / Math.sqrt((double) norm1 * (double) norm2));
+  }
+
+  @Override
+  public float float32SquareDistance(MemorySegment a, MemorySegment b) {
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    float res = 0;
+    int i = 0;
+
+    // if the array is big, unroll it
+    if (length > 32) {
+      float acc1 = 0;
+      float acc2 = 0;
+      float acc3 = 0;
+      float acc4 = 0;
+
+      int upperBound = length & ~(4 - 1);
+      for (; i < upperBound; i += 4) {
+        float diff1 = a.getAtIndex(LE_FLOAT, i) - b.getAtIndex(LE_FLOAT, i);
+        acc1 = fma(diff1, diff1, acc1);
+        float diff2 = a.getAtIndex(LE_FLOAT, i + 1) - b.getAtIndex(LE_FLOAT, i + 1);
+        acc2 = fma(diff2, diff2, acc2);
+        float diff3 = a.getAtIndex(LE_FLOAT, i + 2) - b.getAtIndex(LE_FLOAT, i + 2);
+        acc3 = fma(diff3, diff3, acc3);
+        float diff4 = a.getAtIndex(LE_FLOAT, i + 3) - b.getAtIndex(LE_FLOAT, i + 3);
+        acc4 = fma(diff4, diff4, acc4);
+      }
+      res += acc1 + acc2 + acc3 + acc4;
+    }
+
+    for (; i < length; i++) {
+      float diff = a.getAtIndex(LE_FLOAT, i) - b.getAtIndex(LE_FLOAT, i);
+      res = fma(diff, diff, res);
+    }
+    return res;
+  }
+
+  @Override
+  public int int8DotProduct(MemorySegment a, MemorySegment b) {
+    final long length = a.byteSize();
+    int total = 0;
+    for (long i = 0; i < length; i++) {
+      total += a.get(JAVA_BYTE, i) * b.get(JAVA_BYTE, i);
+    }
+    return total;
+  }
+
+  @Override
+  public float int8Cosine(MemorySegment a, MemorySegment b) {
+    final long length = a.byteSize();
+    // Note: this will not overflow if dim < 2^18, since max(byte * byte) = 2^14.
+    int sum = 0;
+    int norm1 = 0;
+    int norm2 = 0;
+
+    for (long i = 0; i < length; i++) {
+      byte elem1 = a.get(JAVA_BYTE, i);
+      byte elem2 = b.get(JAVA_BYTE, i);
+      sum += elem1 * elem2;
+      norm1 += elem1 * elem1;
+      norm2 += elem2 * elem2;
+    }
+    return (float) (sum / Math.sqrt((double) norm1 * (double) norm2));
+  }
+
+  @Override
+  public int int8SquareDistance(MemorySegment a, MemorySegment b) {
+    final long length = a.byteSize();
+    // Note: this will not overflow if dim < 2^18, since max(byte * byte) = 2^14.
+    int squareSum = 0;
+    for (long i = 0; i < length; i++) {
+      int diff = a.get(JAVA_BYTE, i) - b.get(JAVA_BYTE, i);
       squareSum += diff * diff;
     }
     return squareSum;

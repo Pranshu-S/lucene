@@ -228,6 +228,11 @@ API Changes
 
 New Features
 ---------------------
+* GITHUB#15284: Add MemorySegment based vector functions to VectorUtil (float32DotProduct,
+  float32Cosine, float32SquareDistance, int8DotProduct, int8Cosine, int8SquareDistance), so that
+  off-heap vectors (e.g. slices of memory-mapped files) can be scored without copying them to the
+  heap, with or without the incubating Panama Vector API enabled. (Pranshu Shukla)
+
 * GITHUB#16723: Support SIMD Faiss library variants with runtime fallback. (Abhinav Chinnala)
 
 * GITHUB#16241: Add HangulCompositionCharFilter to analysis-nori for opt-in composition of

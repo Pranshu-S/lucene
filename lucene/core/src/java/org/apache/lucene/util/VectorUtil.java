@@ -17,6 +17,7 @@
 
 package org.apache.lucene.util;
 
+import java.lang.foreign.MemorySegment;
 import java.util.stream.IntStream;
 import org.apache.lucene.internal.vectorization.VectorUtilSupport;
 import org.apache.lucene.internal.vectorization.VectorizationProvider;
@@ -195,6 +196,113 @@ public final class VectorUtil {
       throw new IllegalArgumentException("vector dimensions differ: " + a.length + "!=" + b.length);
     }
     return IMPL.uint8SquareDistance(a, b);
+  }
+
+  /**
+   * Returns the dot product of the two float32 vectors stored in the given memory segments, e.g.
+   * slices of a memory-mapped file or segments wrapping heap arrays. This avoids copying off-heap
+   * vectors to the heap before scoring.
+   *
+   * <p>Each segment must contain exactly one vector: floats are read in little-endian byte order
+   * (the order used by Lucene's index files) starting at offset 0 up to the segment's {@link
+   * MemorySegment#byteSize() byte size}. The segments need not be aligned. For best performance,
+   * pass native segments or heap segments wrapping a whole {@code float[]} (e.g. {@code
+   * MemorySegment.ofArray(query)} on little-endian platforms); other heap segments may be copied.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ or are not a multiple of {@link
+   *     Float#BYTES}.
+   * @see #dotProduct(float[], float[])
+   * @lucene.experimental
+   */
+  public static float float32DotProduct(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Float.BYTES);
+    float r = IMPL.float32DotProduct(a, b);
+    assert Float.isFinite(r);
+    return r;
+  }
+
+  /**
+   * Returns the cosine similarity between the two float32 vectors stored in the given memory
+   * segments. See {@link #float32DotProduct(MemorySegment, MemorySegment)} for the layout of the
+   * segments.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ or are not a multiple of {@link
+   *     Float#BYTES}.
+   * @see #cosine(float[], float[])
+   * @lucene.experimental
+   */
+  public static float float32Cosine(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Float.BYTES);
+    float r = IMPL.float32Cosine(a, b);
+    assert Float.isFinite(r);
+    return r;
+  }
+
+  /**
+   * Returns the sum of squared differences of the two float32 vectors stored in the given memory
+   * segments. See {@link #float32DotProduct(MemorySegment, MemorySegment)} for the layout of the
+   * segments.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ or are not a multiple of {@link
+   *     Float#BYTES}.
+   * @see #squareDistance(float[], float[])
+   * @lucene.experimental
+   */
+  public static float float32SquareDistance(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Float.BYTES);
+    float r = IMPL.float32SquareDistance(a, b);
+    assert Float.isFinite(r);
+    return r;
+  }
+
+  /**
+   * Returns the dot product of the two signed byte vectors stored in the given memory segments,
+   * each segment containing exactly one vector.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ.
+   * @see #dotProduct(byte[], byte[])
+   * @lucene.experimental
+   */
+  public static int int8DotProduct(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Byte.BYTES);
+    return IMPL.int8DotProduct(a, b);
+  }
+
+  /**
+   * Returns the cosine similarity between the two signed byte vectors stored in the given memory
+   * segments, each segment containing exactly one vector.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ.
+   * @see #cosine(byte[], byte[])
+   * @lucene.experimental
+   */
+  public static float int8Cosine(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Byte.BYTES);
+    return IMPL.int8Cosine(a, b);
+  }
+
+  /**
+   * Returns the sum of squared differences of the two signed byte vectors stored in the given
+   * memory segments, each segment containing exactly one vector.
+   *
+   * @throws IllegalArgumentException if the segments' sizes differ.
+   * @see #squareDistance(byte[], byte[])
+   * @lucene.experimental
+   */
+  public static int int8SquareDistance(MemorySegment a, MemorySegment b) {
+    checkSegmentSizes(a, b, Byte.BYTES);
+    return IMPL.int8SquareDistance(a, b);
+  }
+
+  private static void checkSegmentSizes(MemorySegment a, MemorySegment b, int elementBytes) {
+    if (a.byteSize() != b.byteSize()) {
+      throw new IllegalArgumentException(
+          "vector byte sizes differ: " + a.byteSize() + "!=" + b.byteSize());
+    }
+    if (a.byteSize() % elementBytes != 0 || a.byteSize() / elementBytes > Integer.MAX_VALUE) {
+      throw new IllegalArgumentException(
+          "invalid vector byte size for " + elementBytes + "-byte elements: " + a.byteSize());
+    }
   }
 
   /**

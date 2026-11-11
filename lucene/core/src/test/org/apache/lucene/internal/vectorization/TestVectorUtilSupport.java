@@ -17,6 +17,10 @@
 package org.apache.lucene.internal.vectorization;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -32,6 +36,9 @@ public class TestVectorUtilSupport extends BaseVectorizationTestCase {
     1, 4, 6, 8, 13, 16, 25, 32, 64, 100, 128, 207, 256, 300, 512, 702, 1024, 1536, 2046, 2048, 4096,
     4098
   };
+
+  private static final ValueLayout.OfFloat LE_FLOAT =
+      ValueLayout.JAVA_FLOAT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
   private final int size;
   private final double delta;
@@ -96,6 +103,103 @@ public class TestVectorUtilSupport extends BaseVectorizationTestCase {
     assertIntReturningProviders(p -> p.dotProduct(a, b));
     assertIntReturningProviders(p -> p.squareDistance(a, b));
     assertFloatReturningProviders(p -> p.cosine(a, b));
+  }
+
+  public void testFloatVectorsMemorySegment() {
+    var a = new float[size];
+    var b = new float[size];
+    for (int i = 0; i < size; ++i) {
+      a[i] = random().nextFloat();
+      b[i] = random().nextFloat();
+    }
+    try (Arena arena = Arena.ofConfined()) {
+      for (MemorySegment sa : floatSegments(a, arena)) {
+        for (MemorySegment sb : floatSegments(b, arena)) {
+          assertFloatReturningProviders(p -> p.float32DotProduct(sa, sb));
+          assertFloatReturningProviders(p -> p.float32SquareDistance(sa, sb));
+          assertFloatReturningProviders(p -> p.float32Cosine(sa, sb));
+          // the default implementation mirrors the array variants exactly
+          VectorUtilSupport lucene = LUCENE_PROVIDER.getVectorUtilSupport();
+          assertEquals(lucene.dotProduct(a, b), lucene.float32DotProduct(sa, sb), 0f);
+          assertEquals(lucene.squareDistance(a, b), lucene.float32SquareDistance(sa, sb), 0f);
+          assertEquals(lucene.cosine(a, b), lucene.float32Cosine(sa, sb), 0f);
+          VectorUtilSupport panama = PANAMA_OR_NATIVE_PROVIDER.getVectorUtilSupport();
+          assertEquals(panama.dotProduct(a, b), panama.float32DotProduct(sa, sb), delta);
+          assertEquals(panama.squareDistance(a, b), panama.float32SquareDistance(sa, sb), delta);
+          assertEquals(panama.cosine(a, b), panama.float32Cosine(sa, sb), delta);
+        }
+      }
+    }
+  }
+
+  public void testBinaryVectorsMemorySegment() {
+    var a = new byte[size];
+    var b = new byte[size];
+    random().nextBytes(a);
+    random().nextBytes(b);
+    if (random().nextBoolean()) {
+      Arrays.fill(a, random().nextBoolean() ? Byte.MIN_VALUE : Byte.MAX_VALUE);
+      Arrays.fill(b, random().nextBoolean() ? Byte.MIN_VALUE : Byte.MAX_VALUE);
+    }
+    try (Arena arena = Arena.ofConfined()) {
+      for (MemorySegment sa : byteSegments(a, arena)) {
+        for (MemorySegment sb : byteSegments(b, arena)) {
+          for (VectorizationProvider provider :
+              List.of(LUCENE_PROVIDER, PANAMA_OR_NATIVE_PROVIDER)) {
+            VectorUtilSupport p = provider.getVectorUtilSupport();
+            assertEquals(p.dotProduct(a, b), p.int8DotProduct(sa, sb));
+            assertEquals(p.squareDistance(a, b), p.int8SquareDistance(sa, sb));
+            assertEquals(p.cosine(a, b), p.int8Cosine(sa, sb), 1e-6f);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Returns segments holding the given vector in little-endian order: an unaligned slice of a heap
+   * segment, an unaligned slice of a native segment and, on little-endian platforms, a segment
+   * wrapping the array.
+   */
+  private static List<MemorySegment> floatSegments(float[] v, Arena arena) {
+    List<MemorySegment> segments = new ArrayList<>();
+    long byteSize = (long) v.length * Float.BYTES;
+    long offset = 1 + random().nextInt(7);
+    MemorySegment heap = MemorySegment.ofArray(new byte[(int) (offset + byteSize + 3)]);
+    MemorySegment offHeap = arena.allocate(offset + byteSize + 3);
+    for (MemorySegment seg : List.of(heap, offHeap)) {
+      MemorySegment slice = seg.asSlice(offset, byteSize);
+      for (int i = 0; i < v.length; i++) {
+        slice.setAtIndex(LE_FLOAT, i, v[i]);
+      }
+      segments.add(slice);
+    }
+    if (ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN) {
+      segments.add(MemorySegment.ofArray(v));
+      // a slice of a larger float[]
+      float[] larger = new float[v.length + 2];
+      System.arraycopy(v, 0, larger, 1, v.length);
+      segments.add(MemorySegment.ofArray(larger).asSlice(Float.BYTES, byteSize));
+    }
+    return segments;
+  }
+
+  /**
+   * Returns segments holding the given vector: on-heap and unaligned slices of a heap and a native
+   * segment.
+   */
+  private static List<MemorySegment> byteSegments(byte[] v, Arena arena) {
+    long offset = 1 + random().nextInt(7);
+    MemorySegment heap = MemorySegment.ofArray(new byte[(int) offset + v.length + 3]);
+    MemorySegment offHeap = arena.allocate(offset + v.length + 3);
+    List<MemorySegment> segments = new ArrayList<>();
+    segments.add(MemorySegment.ofArray(v));
+    for (MemorySegment seg : List.of(heap, offHeap)) {
+      MemorySegment slice = seg.asSlice(offset, v.length);
+      MemorySegment.copy(v, 0, slice, ValueLayout.JAVA_BYTE, 0, v.length);
+      segments.add(slice);
+    }
+    return segments;
   }
 
   public void testUint8Vectors() {

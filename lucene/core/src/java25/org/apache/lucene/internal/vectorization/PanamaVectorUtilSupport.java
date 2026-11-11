@@ -26,9 +26,11 @@ import static jdk.incubator.vector.VectorOperators.S2I;
 import static jdk.incubator.vector.VectorOperators.ZERO_EXTEND_B2I;
 import static jdk.incubator.vector.VectorOperators.ZERO_EXTEND_B2S;
 import static jdk.incubator.vector.VectorOperators.ZERO_EXTEND_S2I;
+import static org.apache.lucene.internal.vectorization.MemorySegmentBulkVectorOps.LAYOUT_LE_FLOAT;
 import static org.apache.lucene.util.VectorUtil.isUnitVector;
 
 import java.lang.foreign.MemorySegment;
+import java.nio.ByteOrder;
 import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.DoubleVector;
 import jdk.incubator.vector.FloatVector;
@@ -299,6 +301,230 @@ final class PanamaVectorUtilSupport implements VectorUtilSupport {
       FloatVector va = FloatVector.fromArray(FLOAT_SPECIES, a, i);
       FloatVector vb = FloatVector.fromArray(FLOAT_SPECIES, b, i);
       FloatVector diff = va.sub(vb);
+      acc1 = fma(diff, diff, acc1);
+    }
+    // reduce
+    FloatVector res1 = acc1.add(acc2);
+    FloatVector res2 = acc3.add(acc4);
+    return res1.add(res2).reduceLanes(ADD);
+  }
+
+  // float32 MemorySegment variants, same structure as the float[] variants above.
+  //
+  // Only native segments are ever passed to FloatVector#fromMemorySegment: once both heap and
+  // native segments reach it, C2 can no longer intrinsify the load and falls back to a much slower
+  // path that allocates vectors (several times slower than copying to a float[]). Heap segments are
+  // therefore read as float[], and as all three functions are symmetric, the first vector passed
+  // to the bodies is always a native segment.
+
+  /**
+   * Returns the contents of the given heap segment as a float[]: the backing array itself if the
+   * segment wraps a whole float[] in little-endian order, a copy otherwise.
+   */
+  private static float[] heapFloats(MemorySegment seg) {
+    assert seg.isNative() == false;
+    if (seg.heapBase().orElse(null) instanceof float[] array
+        && seg.address() == 0
+        && seg.byteSize() == (long) array.length * Float.BYTES
+        && ByteOrder.nativeOrder() == LITTLE_ENDIAN) {
+      return array;
+    }
+    return seg.toArray(LAYOUT_LE_FLOAT);
+  }
+
+  private static FloatVector loadFloats(MemorySegment seg, int index) {
+    return FloatVector.fromMemorySegment(
+        FLOAT_SPECIES, seg, (long) index * Float.BYTES, LITTLE_ENDIAN);
+  }
+
+  /** Loads from {@code array} if not null, from the native {@code seg} otherwise. */
+  private static FloatVector loadFloats(float[] array, MemorySegment seg, int index) {
+    return array != null
+        ? FloatVector.fromArray(FLOAT_SPECIES, array, index)
+        : loadFloats(seg, index);
+  }
+
+  private static float getFloat(MemorySegment seg, int index) {
+    return seg.getAtIndex(LAYOUT_LE_FLOAT, index);
+  }
+
+  private static float getFloat(float[] array, MemorySegment seg, int index) {
+    return array != null ? array[index] : getFloat(seg, index);
+  }
+
+  @Override
+  public float float32DotProduct(MemorySegment a, MemorySegment b) {
+    if (a.isNative() == false) {
+      return b.isNative() ? float32DotProduct(b, a) : dotProduct(heapFloats(a), heapFloats(b));
+    }
+    final float[] bArray = b.isNative() ? null : heapFloats(b);
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    int i = 0;
+    float res = 0;
+
+    // if the array size is large (> 2x platform vector size), it's worth the overhead to vectorize
+    if (length > 2 * FLOAT_SPECIES.length()) {
+      i += FLOAT_SPECIES.loopBound(length);
+      res += dotProductBody(a, bArray, b, i);
+    }
+
+    // scalar tail
+    for (; i < length; i++) {
+      res = fma(getFloat(a, i), getFloat(bArray, b, i), res);
+    }
+    return res;
+  }
+
+  /** vectorized float dot product body */
+  private static float dotProductBody(MemorySegment a, float[] bArray, MemorySegment b, int limit) {
+    int i = 0;
+    // vector loop is unrolled 4x (4 accumulators in parallel)
+    FloatVector acc1 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc2 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc3 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc4 = FloatVector.zero(FLOAT_SPECIES);
+    final int len = FLOAT_SPECIES.length();
+    int unrolledLimit = limit - 3 * len;
+    for (; i < unrolledLimit; i += 4 * len) {
+      acc1 = fma(loadFloats(a, i), loadFloats(bArray, b, i), acc1);
+      acc2 = fma(loadFloats(a, i + len), loadFloats(bArray, b, i + len), acc2);
+      acc3 = fma(loadFloats(a, i + 2 * len), loadFloats(bArray, b, i + 2 * len), acc3);
+      acc4 = fma(loadFloats(a, i + 3 * len), loadFloats(bArray, b, i + 3 * len), acc4);
+    }
+    // vector tail: less scalar computations for unaligned sizes, esp with big vector sizes
+    for (; i < limit; i += len) {
+      acc1 = fma(loadFloats(a, i), loadFloats(bArray, b, i), acc1);
+    }
+    // reduce
+    FloatVector res1 = acc1.add(acc2);
+    FloatVector res2 = acc3.add(acc4);
+    return res1.add(res2).reduceLanes(ADD);
+  }
+
+  @Override
+  public float float32Cosine(MemorySegment a, MemorySegment b) {
+    if (a.isNative() == false) {
+      return b.isNative() ? float32Cosine(b, a) : cosine(heapFloats(a), heapFloats(b));
+    }
+    final float[] bArray = b.isNative() ? null : heapFloats(b);
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    int i = 0;
+    float sum = 0;
+    float norm1 = 0;
+    float norm2 = 0;
+
+    // if the array size is large (> 2x platform vector size), it's worth the overhead to vectorize
+    if (length > 2 * FLOAT_SPECIES.length()) {
+      i += FLOAT_SPECIES.loopBound(length);
+      float[] ret = cosineBody(a, bArray, b, i);
+      sum += ret[0];
+      norm1 += ret[1];
+      norm2 += ret[2];
+    }
+
+    // scalar tail
+    for (; i < length; i++) {
+      float ai = getFloat(a, i);
+      float bi = getFloat(bArray, b, i);
+      sum = fma(ai, bi, sum);
+      norm1 = fma(ai, ai, norm1);
+      norm2 = fma(bi, bi, norm2);
+    }
+    return (float) (sum / Math.sqrt((double) norm1 * (double) norm2));
+  }
+
+  /** vectorized cosine body */
+  private static float[] cosineBody(MemorySegment a, float[] bArray, MemorySegment b, int limit) {
+    int i = 0;
+    // vector loop is unrolled 2x (2 accumulators in parallel)
+    FloatVector sum1 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector sum2 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector norm1_1 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector norm1_2 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector norm2_1 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector norm2_2 = FloatVector.zero(FLOAT_SPECIES);
+    final int len = FLOAT_SPECIES.length();
+    int unrolledLimit = limit - len;
+    for (; i < unrolledLimit; i += 2 * len) {
+      // one
+      FloatVector va = loadFloats(a, i);
+      FloatVector vb = loadFloats(bArray, b, i);
+      sum1 = fma(va, vb, sum1);
+      norm1_1 = fma(va, va, norm1_1);
+      norm2_1 = fma(vb, vb, norm2_1);
+
+      // two
+      FloatVector vc = loadFloats(a, i + len);
+      FloatVector vd = loadFloats(bArray, b, i + len);
+      sum2 = fma(vc, vd, sum2);
+      norm1_2 = fma(vc, vc, norm1_2);
+      norm2_2 = fma(vd, vd, norm2_2);
+    }
+    // vector tail: less scalar computations for unaligned sizes, esp with big vector sizes
+    for (; i < limit; i += len) {
+      FloatVector va = loadFloats(a, i);
+      FloatVector vb = loadFloats(bArray, b, i);
+      sum1 = fma(va, vb, sum1);
+      norm1_1 = fma(va, va, norm1_1);
+      norm2_1 = fma(vb, vb, norm2_1);
+    }
+    return new float[] {
+      sum1.add(sum2).reduceLanes(ADD),
+      norm1_1.add(norm1_2).reduceLanes(ADD),
+      norm2_1.add(norm2_2).reduceLanes(ADD)
+    };
+  }
+
+  @Override
+  public float float32SquareDistance(MemorySegment a, MemorySegment b) {
+    if (a.isNative() == false) {
+      return b.isNative()
+          ? float32SquareDistance(b, a)
+          : squareDistance(heapFloats(a), heapFloats(b));
+    }
+    final float[] bArray = b.isNative() ? null : heapFloats(b);
+    final int length = (int) (a.byteSize() / Float.BYTES);
+    int i = 0;
+    float res = 0;
+
+    // if the array size is large (> 2x platform vector size), it's worth the overhead to vectorize
+    if (length > 2 * FLOAT_SPECIES.length()) {
+      i += FLOAT_SPECIES.loopBound(length);
+      res += squareDistanceBody(a, bArray, b, i);
+    }
+
+    // scalar tail
+    for (; i < length; i++) {
+      float diff = getFloat(a, i) - getFloat(bArray, b, i);
+      res = fma(diff, diff, res);
+    }
+    return res;
+  }
+
+  /** vectorized square distance body */
+  private static float squareDistanceBody(
+      MemorySegment a, float[] bArray, MemorySegment b, int limit) {
+    int i = 0;
+    // vector loop is unrolled 4x (4 accumulators in parallel)
+    FloatVector acc1 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc2 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc3 = FloatVector.zero(FLOAT_SPECIES);
+    FloatVector acc4 = FloatVector.zero(FLOAT_SPECIES);
+    final int len = FLOAT_SPECIES.length();
+    int unrolledLimit = limit - 3 * len;
+    for (; i < unrolledLimit; i += 4 * len) {
+      FloatVector diff1 = loadFloats(a, i).sub(loadFloats(bArray, b, i));
+      acc1 = fma(diff1, diff1, acc1);
+      FloatVector diff2 = loadFloats(a, i + len).sub(loadFloats(bArray, b, i + len));
+      acc2 = fma(diff2, diff2, acc2);
+      FloatVector diff3 = loadFloats(a, i + 2 * len).sub(loadFloats(bArray, b, i + 2 * len));
+      acc3 = fma(diff3, diff3, acc3);
+      FloatVector diff4 = loadFloats(a, i + 3 * len).sub(loadFloats(bArray, b, i + 3 * len));
+      acc4 = fma(diff4, diff4, acc4);
+    }
+    // vector tail: less scalar computations for unaligned sizes, esp with big vector sizes
+    for (; i < limit; i += len) {
+      FloatVector diff = loadFloats(a, i).sub(loadFloats(bArray, b, i));
       acc1 = fma(diff, diff, acc1);
     }
     // reduce
@@ -959,6 +1185,37 @@ final class PanamaVectorUtilSupport implements VectorUtilSupport {
 
   public static int squareDistance(byte[] a, MemorySegment b) {
     return squareDistanceBody(new ArrayLoader(a), new MemorySegmentLoader(b));
+  }
+
+  /**
+   * Like for floats, only native segments are loaded through {@link MemorySegmentLoader}, heap
+   * segments are read as byte[] (see {@link #heapFloats}).
+   */
+  private static ByteVectorLoader loader(MemorySegment seg) {
+    if (seg.isNative()) {
+      return new MemorySegmentLoader(seg);
+    }
+    if (seg.heapBase().orElse(null) instanceof byte[] array
+        && seg.address() == 0
+        && seg.byteSize() == array.length) {
+      return new ArrayLoader(array);
+    }
+    return new ArrayLoader(seg.toArray(JAVA_BYTE));
+  }
+
+  @Override
+  public int int8DotProduct(MemorySegment a, MemorySegment b) {
+    return dotProductBody(loader(a), loader(b));
+  }
+
+  @Override
+  public float int8Cosine(MemorySegment a, MemorySegment b) {
+    return cosineBody(loader(a), loader(b));
+  }
+
+  @Override
+  public int int8SquareDistance(MemorySegment a, MemorySegment b) {
+    return squareDistanceBody(loader(a), loader(b));
   }
 
   public static int uint8SquareDistance(MemorySegment a, MemorySegment b) {
