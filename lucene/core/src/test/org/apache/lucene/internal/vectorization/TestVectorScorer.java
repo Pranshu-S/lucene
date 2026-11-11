@@ -245,6 +245,31 @@ public class TestVectorScorer extends LuceneTestCase {
     }
   }
 
+  // Tests that the dot product score does not overflow for vectors with at least 2^16 dimensions
+  public void testDotProductScoreLargeDimension() throws IOException {
+    final int dims = 1 << 16;
+    byte[] vec = new byte[dims];
+    Arrays.fill(vec, (byte) 127);
+    float expected = (float) (0.5 + (127 * 127 * (double) dims) / (dims * (double) (1 << 15)));
+    try (Directory dir = new MMapDirectory(createTempDir("testDotProductScoreLargeDimension"))) {
+      String fileName = "large-" + dims;
+      try (IndexOutput out = dir.createOutput(fileName, IOContext.DEFAULT)) {
+        byte[] bytes = concat(vec, vec);
+        out.writeBytes(bytes, 0, bytes.length);
+      }
+      try (IndexInput in = dir.openInput(fileName, IOContext.DEFAULT)) {
+        var vectorValues = vectorValues(dims, 2, in, DOT_PRODUCT);
+        for (var flatScorer : List.of(DEFAULT_SCORER, MEMSEG_SCORER)) {
+          var scorer = flatScorer.getRandomVectorScorerSupplier(DOT_PRODUCT, vectorValues).scorer();
+          scorer.setScoringOrdinal(0);
+          assertEquals(expected, scorer.score(1), DELTA);
+          var queryScorer = flatScorer.getRandomVectorScorer(DOT_PRODUCT, vectorValues, vec);
+          assertEquals(expected, queryScorer.score(1), DELTA);
+        }
+      }
+    }
+  }
+
   // Tests that copies in threads do not interfere with each other
   public void testCopiesAcrossThreads() throws Exception {
     final long maxChunkSize = 32;

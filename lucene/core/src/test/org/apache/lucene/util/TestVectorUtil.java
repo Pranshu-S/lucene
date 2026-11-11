@@ -283,6 +283,15 @@ public class TestVectorUtil extends LuceneTestCase {
     assertEquals(1, VectorUtil.dotProductScore(min, min), DELTA);
   }
 
+  public void testDotProductScoreBytesLargeDimension() {
+    // a.length * 2^15 overflows an int from 65,536 dimensions
+    int dims = 1 << 16;
+    byte[] a = new byte[dims];
+    Arrays.fill(a, (byte) 127);
+    float expected = (float) (0.5 + (127 * 127 * (double) dims) / (dims * (double) (1 << 15)));
+    assertEquals(expected, VectorUtil.dotProductScore(a, a), DELTA);
+  }
+
   public void testSelfDotProductBytes() {
     // the dot product of a vector with itself is equal to the sum of the squares of its components
     byte[] v = randomVectorBytes();

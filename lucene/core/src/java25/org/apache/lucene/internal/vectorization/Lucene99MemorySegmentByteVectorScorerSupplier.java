@@ -166,7 +166,7 @@ public abstract sealed class Lucene99MemorySegmentByteVectorScorerSupplier
                 PanamaVectorUtilSupport.dotProduct(
                     getFirstSegment(queryOrd), getSecondSegment(node));
           }
-          return 0.5f + raw / (float) (values.dimension() * (1 << 15));
+          return 0.5f + raw / ((float) values.dimension() * (1 << 15));
         }
 
         @Override

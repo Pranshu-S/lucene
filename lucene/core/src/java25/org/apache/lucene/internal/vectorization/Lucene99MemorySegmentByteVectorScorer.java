@@ -124,7 +124,7 @@ abstract sealed class Lucene99MemorySegmentByteVectorScorer
       } else {
         raw = PanamaVectorUtilSupport.dotProduct(query, getSegment(node));
       }
-      return 0.5f + raw / (float) (query.length * (1 << 15));
+      return 0.5f + raw / ((float) query.length * (1 << 15));
     }
   }
 
