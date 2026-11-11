@@ -194,7 +194,7 @@ public class HnswGraphBuilder implements HnswBuilder {
     this.bulkScores = new float[MAX_BULK_SCORE_NODES];
     entryCandidates = new GraphBuilderKnnCollector(1);
     beamCandidates = new GraphBuilderKnnCollector(beamWidth);
-    beamCandidates0 = new GraphBuilderKnnCollector(Math.min(beamWidth / 2, M * 3));
+    beamCandidates0 = new GraphBuilderKnnCollector(Math.max(1, Math.min(beamWidth / 2, M * 3)));
   }
 
   @Override

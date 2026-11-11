@@ -916,6 +916,19 @@ abstract class HnswGraphTestCase<T> extends LuceneTestCase {
         IllegalArgumentException.class, () -> HnswGraphBuilder.create(scorerSupplier, 10, 0, 0));
   }
 
+  public void testBuildWithBeamWidthOne() throws IOException {
+    int size = atLeast(100);
+    KnnVectorValues vectors = vectorValues(size, atLeast(4));
+    RandomVectorScorerSupplier scorerSupplier = buildScorerSupplier(vectors);
+    HnswGraphBuilder builder =
+        HnswGraphBuilder.create(scorerSupplier, random().nextInt(1, 16), 1, random().nextLong());
+    OnHeapHnswGraph hnsw = builder.build(vectors.size());
+    assertEquals(size, hnsw.size());
+    for (int node = 1; node < size; node++) {
+      assertTrue(hnsw.getNeighbors(0, node).size() > 0);
+    }
+  }
+
   public void testAbortCheckSetAtMostOnce() throws IOException {
     RandomVectorScorerSupplier scorerSupplier = buildScorerSupplier(vectorValues(1, 1));
     HnswGraphBuilder builder = HnswGraphBuilder.create(scorerSupplier, 10, 10, 0);
